@@ -21,6 +21,10 @@ CTF details are scattered across calendars, platform pages, rule documents, and 
 
 ![Flagwatch public August 2026 month calendar with CTF events and source status](artifacts/flagwatch-public-calendar-1440.png)
 
+## Project status
+
+As checked on September 6, 2026, the package version is `0.1.0` and no versioned GitHub release has been published. The repository includes the calendar, collectors, Docker setup, and local quality checks described below. No GitHub Actions workflow is merged on `main` yet; use the documented local checks when contributing.
+
 ## What Flagwatch does
 
 | Capability | What you get |
