@@ -74,3 +74,48 @@ def test_ai_discovery_rejects_hallucinated_quote_and_unapproved_url() -> None:
     )
 
     assert events == []
+
+
+def test_ai_discovery_binds_quote_to_the_returned_event_page() -> None:
+    quote = "Safe CTF starts August 29 at 12:00 UTC and ends August 30 at 12:00 UTC."
+    event_url = "https://organizer.example/events/safe-ctf"
+    connector = RecordingConnector({"events": [record(quote)]})
+    extractor = WatchPageDiscoveryExtractor(connector)
+
+    events = extractor.try_extract(
+        EvidenceDocument(
+            "https://organizer.example/events",
+            f"Another official page contains this sentence: {quote}",
+        ),
+        [event_url],
+        {event_url: "This event page has no date evidence."},
+    )
+
+    assert events == []
+
+
+def test_ai_discovery_keeps_query_specific_evidence_separate() -> None:
+    quote = "Query one says Safe CTF starts August 29 and ends August 30."
+    query_one = "https://organizer.example/event?id=1"
+    query_two = "https://organizer.example/event?id=2"
+    unapproved = "https://organizer.example/event?id=3"
+    response = record(quote)
+    response["url"] = query_two
+    unknown_response = record(quote)
+    unknown_response["url"] = unapproved
+    connector = RecordingConnector({"events": [response, unknown_response]})
+    extractor = WatchPageDiscoveryExtractor(connector)
+
+    events = extractor.try_extract(
+        EvidenceDocument(
+            "https://organizer.example/events",
+            f"OFFICIAL PAGE URL: {query_one}\n{quote}",
+        ),
+        [query_one, query_two],
+        {
+            query_two: "Query two has no event date evidence.",
+            query_one: quote,
+        },
+    )
+
+    assert events == []

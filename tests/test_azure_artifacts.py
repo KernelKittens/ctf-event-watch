@@ -30,7 +30,7 @@ def test_deploy_script_enforces_function_and_safety_contract() -> None:
         "FLAGWATCH_SEND_ENABLED = 'false'",
         "FLAGWATCH_AI_ENABLED = 'true'",
         "FLAGWATCH_AI_PROVIDER = 'azure_openai'",
-        "FLAGWATCH_AI_MODEL = 'DeepSeek-V4-Pro'",
+        "FLAGWATCH_AI_MODEL = 'DeepSeek-V4-Flash-0731'",
         "FLAGWATCH_AI_ENDPOINT = 'https://kitsunetechnologies.services.ai.azure.com/openai/v1/chat/completions'",
         "FLAGWATCH_CTFTIME_ENABLED = 'true'",
         "FLAGWATCH_CTFTIME_LOOKBACK_DAYS = '31'",

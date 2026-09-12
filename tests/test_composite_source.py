@@ -175,6 +175,54 @@ def test_higher_precedence_wins_and_safety_conflict_suppresses_alert() -> None:
     assert all(conflict.suppresses_alert for conflict in event.conflicts)
 
 
+def test_merge_bounds_long_conflicts_without_dropping_healthy_events() -> None:
+    official_event, official_facts = make_event(
+        "official",
+        "event",
+        ref_url="https://example.test/rules",
+        kind=SourceKind.OFFICIAL_PAGE,
+    )
+    feed_event, feed_facts = make_event(
+        "feed",
+        "42",
+        ref_url="https://example.test/events.json",
+        kind=SourceKind.JSON_FEED,
+    )
+    healthy = make_event(
+        "healthy",
+        "1",
+        official_url="https://healthy.test/event",
+    )
+    official = (
+        official_event,
+        official_facts.model_copy(update={"prize_summary": "A" * 501}),
+    )
+    feed = (
+        feed_event,
+        feed_facts.model_copy(update={"prize_summary": "B" * 501}),
+    )
+
+    batch = CompositeSource(
+        [
+            StubSource("official", 10, [official]),
+            StubSource("feed", 30, [feed]),
+            StubSource("healthy", 20, [healthy]),
+        ],
+        now=lambda: datetime(2026, 8, 23, 16, tzinfo=UTC),
+    ).fetch_events(
+        datetime(2026, 8, 1, tzinfo=UTC),
+        datetime(2026, 10, 1, tzinfo=UTC),
+    )
+
+    assert {event.key for event, _facts in batch.events} == {"official:event", "healthy:1"}
+    merged = next(event for event, _facts in batch.events if event.key == "official:event")
+    conflict = next(item for item in merged.conflicts if item.field == "prize_summary")
+    assert len(conflict.chosen_value) == 500
+    assert len(conflict.other_value) == 500
+    assert conflict.chosen_value.endswith("...")
+    assert conflict.other_value.endswith("...")
+
+
 def test_source_failures_do_not_remove_healthy_events() -> None:
     healthy = make_event("healthy", "1")
     batch = CompositeSource(

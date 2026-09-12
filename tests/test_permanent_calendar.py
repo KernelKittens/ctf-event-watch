@@ -340,7 +340,7 @@ def test_deployment_contract_keeps_http_always_ready_and_enables_intelligence() 
     assert "http=1" in script
     assert "FLAGWATCH_CTFTIME_LOOKBACK_DAYS = '31'" in script
     assert "FLAGWATCH_AI_ENABLED = 'true'" in script
-    assert "FLAGWATCH_AI_MODEL = 'DeepSeek-V4-Pro'" in script
+    assert "FLAGWATCH_AI_MODEL = 'DeepSeek-V4-Flash-0731'" in script
     assert '"FLAGWATCH_AI_API_KEY=$aiApiKey"' not in script
     assert '--settings "@$aiSettingsPath"' in script
     assert "SetUnixFileMode" in script

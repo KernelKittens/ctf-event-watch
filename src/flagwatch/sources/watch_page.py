@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Protocol
 from urllib.parse import urldefrag, urljoin, urlsplit
@@ -24,10 +24,13 @@ class DiscoveryExtractor(Protocol):
         self,
         document: EvidenceDocument,
         allowed_urls: Sequence[str],
+        evidence_by_url: Mapping[str, str] | None = None,
     ) -> list[DiscoveredWatchEvent]: ...
 
 
 EVENT_LINK_TERMS = ("ctf", "event", "competition", "challenge", "hack")
+DISCOVERY_PAGE_TEXT_LIMIT = 3_000
+DISCOVERY_DOCUMENT_TEXT_LIMIT = 36_000
 
 
 def _event_type(value: object) -> bool:
@@ -251,13 +254,43 @@ class WatchPageSource:
     def _model_events(
         self,
         homepage: FetchedPage,
-        allowed_urls: Sequence[str],
+        pages: Sequence[FetchedPage],
     ) -> list[tuple[Event, EventFacts]]:
-        if self.discovery_extractor is None:
+        if self.discovery_extractor is None or len(pages) < 2:
             return []
+        unique_pages: dict[str, FetchedPage] = {}
+        for page in pages[1:]:
+            key = page.url.rstrip("/").casefold()
+            unique_pages.setdefault(key, page)
+        approved_pages = list(unique_pages.values())
+        if not approved_pages:
+            return []
+        all_pages = [homepage, *approved_pages]
+        allowed_urls = [page.url for page in approved_pages]
         linked_text = "\n".join(f"APPROVED EVENT URL: {url}" for url in allowed_urls)
-        document = EvidenceDocument(homepage.url, f"{homepage.text}\n{linked_text}".strip())
-        records = self.discovery_extractor.try_extract(document, allowed_urls)
+        headers = [f"OFFICIAL PAGE URL: {page.url}\n" for page in all_pages]
+        fixed_length = (
+            sum(len(header) for header in headers) + len("\n\n") * len(all_pages) + len(linked_text)
+        )
+        per_page_limit = min(
+            DISCOVERY_PAGE_TEXT_LIMIT,
+            max(0, DISCOVERY_DOCUMENT_TEXT_LIMIT - fixed_length) // len(all_pages),
+        )
+        if per_page_limit == 0:
+            return []
+        snippets = [page.text[:per_page_limit] for page in all_pages]
+        page_text = "\n\n".join(
+            f"{header}{snippet}" for header, snippet in zip(headers, snippets, strict=True)
+        )
+        document = EvidenceDocument(homepage.url, f"{page_text}\n\n{linked_text}".strip())
+        evidence_by_url = {
+            page.url: snippet for page, snippet in zip(approved_pages, snippets[1:], strict=True)
+        }
+        records = self.discovery_extractor.try_extract(
+            document,
+            allowed_urls,
+            evidence_by_url,
+        )
         events: list[tuple[Event, EventFacts]] = []
         for record in records:
             payload: dict[str, Any] = {
@@ -282,23 +315,32 @@ class WatchPageSource:
             return EventBatch(
                 failures=[f"{self.source_name}: {type(error).__name__}: watch page unavailable"]
             )
+        if not _same_origin(self.url, homepage.url):
+            return EventBatch(
+                failures=[f"{self.source_name}: watch page redirected outside configured origin"]
+            )
         links = discover_event_links(homepage.url, homepage.html or "", self.max_event_pages)
         pages = [homepage]
         failures: list[str] = []
         for link in links:
             try:
-                pages.append(self.fetcher.get_page(link))
+                page = self.fetcher.get_page(link)
             except (FetchError, httpx.HTTPError, OSError) as error:
                 failures.append(
                     f"{self.source_name}: {link}: {type(error).__name__}: event page unavailable"
                 )
+                continue
+            if not _same_origin(homepage.url, page.url):
+                failures.append(f"{self.source_name}: {link}: redirected outside configured origin")
+                continue
+            pages.append(page)
         events: list[tuple[Event, EventFacts]] = []
         for page in pages:
             parsed, parse_failures = self._json_ld_events(page)
             events.extend(parsed)
             failures.extend(parse_failures)
         if not events:
-            events.extend(self._model_events(homepage, links))
+            events.extend(self._model_events(homepage, pages))
         unique: dict[str, tuple[Event, EventFacts]] = {}
         for event, facts in events:
             if event.starts_at < finish and event.finishes_at > start:

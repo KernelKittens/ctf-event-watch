@@ -257,7 +257,7 @@ try {
         FLAGWATCH_STORAGE_CONTAINER = 'flagwatch'
         FLAGWATCH_AI_ENABLED = 'true'
         FLAGWATCH_AI_PROVIDER = 'azure_openai'
-        FLAGWATCH_AI_MODEL = 'DeepSeek-V4-Pro'
+        FLAGWATCH_AI_MODEL = 'DeepSeek-V4-Flash-0731'
         FLAGWATCH_AI_ENDPOINT = 'https://kitsunetechnologies.services.ai.azure.com/openai/v1/chat/completions'
         FLAGWATCH_AI_API_KEY = $aiApiKey
         FLAGWATCH_AI_TIMEOUT_SECONDS = '60'

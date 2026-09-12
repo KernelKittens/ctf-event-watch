@@ -9,6 +9,9 @@ def match_event(event: Event, facts: EventFacts, criteria: Criteria) -> MatchRes
     rejected: list[str] = []
     matched: list[str] = []
 
+    if any(conflict.suppresses_alert for conflict in event.conflicts):
+        rejected.append("Authoritative source facts conflict")
+
     if facts.analysis_stale:
         rejected.append("Rule analysis is stale")
 

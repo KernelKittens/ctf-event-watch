@@ -44,6 +44,8 @@ FACT_FIELDS = (
     "categories",
 )
 SAFETY_FACT_FIELDS = {"team_max", "registration_status"}
+CONFLICT_VALUE_MAX_LENGTH = 500
+CONFLICT_VALUE_ELLIPSIS = "..."
 
 
 def _canonical_url(value: object) -> str:
@@ -96,10 +98,15 @@ def _source_url(event: Event) -> str:
 
 def _printable(value: object) -> str:
     if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    if isinstance(value, list):
-        return ", ".join(str(item) for item in value)
-    return "" if value is None else str(value)
+        rendered = value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    elif isinstance(value, list):
+        rendered = ", ".join(str(item) for item in value)
+    else:
+        rendered = "" if value is None else str(value)
+    if len(rendered) <= CONFLICT_VALUE_MAX_LENGTH:
+        return rendered
+    keep = CONFLICT_VALUE_MAX_LENGTH - len(CONFLICT_VALUE_ELLIPSIS)
+    return f"{rendered[:keep]}{CONFLICT_VALUE_ELLIPSIS}"
 
 
 def _is_empty(value: object) -> bool:
