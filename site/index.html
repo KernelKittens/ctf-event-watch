@@ -34,16 +34,47 @@
         </div>
 
         <section class="scan-summary" id="scan-summary" aria-label="Latest source scan">
-          <div class="scan-item scan-refresh"><span>Latest sweep</span><strong id="scan-updated">Loading</strong></div>
+          <div class="scan-item scan-refresh"><span>Published update</span><strong id="scan-updated">Loading</strong></div>
           <div class="scan-item"><span>Retained range</span><strong id="scan-events">0 CTFs</strong></div>
           <div class="scan-item scan-good"><span>Sources read</span><strong id="scan-sources">0 sources</strong></div>
           <div class="scan-item scan-warn"><span>Source status</span><strong id="scan-recheck">0 need recheck</strong></div>
           <div class="scan-item scan-warn"><span>AI policy</span><strong id="scan-confirmed">0 confirmed</strong></div>
         </section>
 
-        <p class="policy-note">Events with a confirmed ban on all AI use are omitted. Unverified rules never trigger alerts.</p>
-        <p class="history-note">Includes finished CTFs from the previous 31 days and the next 90 days.</p>
-        <p class="site-description" id="site-description">CTF events, official rules, and cited source intelligence.</p>
+        <p class="policy-note">AI status is based on published event rules.</p>
+        <details class="coverage-details">
+          <summary>Worldwide sources and recheck schedule</summary>
+          <p class="history-note">Discovery runs every 15 minutes. Rule checks are scheduled more often as events approach. Source delays may affect the latest update.</p>
+          <p class="site-description" id="site-description">CTF events, official rules, and cited source intelligence.</p>
+          <p class="history-note" id="source-coverage"></p>
+        <p>Schedule fallback: <a href="https://github.com/ProbiusOfficial/Hello-CTFtime" rel="noopener">Hello-CTFTime</a> mirrors CTFtime. It is a recovery route, not independent confirmation.</p>
+        </details>
+        <section class="calendar-filters" aria-label="Find a CTF">
+          <div class="search-field"><label for="event-search">Find a CTF</label><input id="event-search" type="search" placeholder="Name, organizer, or category" autocomplete="off"></div>
+          <div><label for="policy-filter">AI rules</label><select id="policy-filter"><option value="candidates">Not known to ban AI</option><option value="all">All policies</option><option value="allowed">AI allowed</option><option value="human_only">Human-only</option><option value="unknown">Needs checking</option></select></div>
+          <div><label for="team-filter">Team size</label><select id="team-filter"><option value="all">All sizes</option><option value="solo">Solo (1 player)</option><option value="small">Small (2–4 players)</option><option value="large">Large (5+ players)</option><option value="unlimited">Open / Unlimited</option></select></div>
+          <div><label for="location-filter">Location</label><select id="location-filter"><option value="all">All events</option><option value="online">Online or hybrid</option><option value="onsite">Onsite</option><option value="usa">USA bonus</option><option value="missouri">Missouri bonus</option><option value="st_louis">St. Louis bonus</option></select></div>
+          <div><a class="subscribe-link" href="/candidates.ics">Subscribe: AI candidates</a><small class="subscription-note">Includes unverified events. <a href="/calendar.ics">All CTFs</a></small></div>
+        </section>
+        <div class="filter-chips-container" role="region" aria-label="Quick filter badges">
+          <div class="filter-chip-group" data-group="policy">
+            <span class="filter-group-label">AI Policy:</span>
+            <button type="button" class="filter-chip" data-filter="policy" data-value="all">All</button>
+            <button type="button" class="filter-chip chip-ai-allowed" data-filter="policy" data-value="allowed">🟢 AI Allowed</button>
+            <button type="button" class="filter-chip chip-ai-prohibited" data-filter="policy" data-value="human_only">🔴 AI Prohibited</button>
+            <button type="button" class="filter-chip active" data-filter="policy" data-value="candidates">Not Banned</button>
+            <button type="button" class="filter-chip" data-filter="policy" data-value="unknown">⚪ Needs Checking</button>
+          </div>
+          <div class="filter-chip-group" data-group="teamSize">
+            <span class="filter-group-label">Team Size:</span>
+            <button type="button" class="filter-chip active" data-filter="teamSize" data-value="all">All Sizes</button>
+            <button type="button" class="filter-chip" data-filter="teamSize" data-value="solo">👤 Solo (1)</button>
+            <button type="button" class="filter-chip" data-filter="teamSize" data-value="small">👥 2–4 Players</button>
+            <button type="button" class="filter-chip" data-filter="teamSize" data-value="large">👥 5+ Players</button>
+            <button type="button" class="filter-chip" data-filter="teamSize" data-value="unlimited">♾️ Open / Unlimited</button>
+          </div>
+        </div>
+        <p class="filter-count" id="filter-count" aria-live="polite"></p>
 
         <p class="status" id="status" role="status">Loading CTFs...</p>
         <div class="calendar" id="calendar" role="grid" aria-label="Month calendar" tabindex="-1"></div>

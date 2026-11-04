@@ -24,6 +24,7 @@
   const initialZone = savedZone || detectZone();
   const state = {
     events: [],
+    query: "", policy: "candidates", location: "all", teamSize: "all",
     scanSummary: null,
     generatedAt: null,
     month: monthFromUrl(initialZone),
@@ -223,7 +224,7 @@
   }
 
   function eventsOn(date) {
-    return state.events.filter((event) => eventDays(event).includes(date));
+    return state.events.filter((event) => matchesFilters(event) && eventDays(event).includes(date)).sort((a, b) => priority(b) - priority(a));
   }
 
   function updateUrl(values = {}, mode = "replace") {
@@ -253,7 +254,34 @@
     renderCalendar();
   }
 
+  function matchesFilters(event) {
+    const searchable = [event.title, ...(event.organizers || []), ...(event.categories || [])].join(" ").toLowerCase();
+    if (state.query && !searchable.includes(state.query)) return false;
+    if (state.location === "online" && !event.online) return false;
+    if (state.location === "onsite" && !event.onsite) return false;
+    const geography = event.assessment?.location?.geography || "unknown";
+    if (state.location === "usa" && !["usa", "missouri", "st_louis"].includes(geography)) return false;
+    if (state.location === "missouri" && !["missouri", "st_louis"].includes(geography)) return false;
+    if (state.location === "st_louis" && geography !== "st_louis") return false;
+    if (state.policy === "candidates" && event.ai_policy === "human_only") return false;
+    if (state.policy === "allowed") return ["ai_native", "ai_assisted"].includes(event.ai_policy);
+    if (state.policy === "human_only") return event.ai_policy === "human_only";
+    if (state.policy === "unknown") return !event.ai_policy || event.ai_policy === "unknown";
+
+    if (state.teamSize === "solo") {
+      if (event.team_max !== 1) return false;
+    } else if (state.teamSize === "small") {
+      if (event.team_max === null || event.team_max < 2 || event.team_max > 4) return false;
+    } else if (state.teamSize === "large") {
+      if (event.team_max === null || event.team_max < 5) return false;
+    } else if (state.teamSize === "unlimited") {
+      if (event.team_max !== null && event.team_max !== 0) return false;
+    }
+    return true;
+  }
+
   function renderCalendar() {
+    document.querySelector("#filter-count").textContent = `${state.events.filter(matchesFilters).length} matching CTFs across the collected schedule`;
     elements.heading.textContent = new Intl.DateTimeFormat("en-US", {
       month: "long",
       year: "numeric",
@@ -349,6 +377,10 @@
     title.className = "event-name";
     title.textContent = event.title;
     button.append(title);
+    const geo = event.assessment?.location?.geography;
+    if (["st_louis", "missouri", "usa"].includes(geo)) {
+      const bonus = document.createElement("small"); bonus.textContent = {st_louis: "St. Louis", missouri: "Missouri", usa: "USA"}[geo]; button.append(bonus);
+    }
     if (includeTime) {
       const time = document.createElement("span");
       time.className = "event-time";
@@ -383,9 +415,73 @@
       elements.selectedEvents.append(empty);
       return;
     }
-    events.forEach((event) =>
-      elements.selectedEvents.append(eventButton(event, "day-event", true)),
-    );
+    events.forEach((event) => {
+      const card = document.createElement("article");
+      card.className = "event-overview";
+      card.append(eventButton(event, "day-event", true));
+      const facts = document.createElement("div");
+      facts.className = "event-brief";
+      const ai = document.createElement("span");
+      ai.textContent = policyLabel(event);
+      ai.dataset.policy = policyClass(event);
+
+      const team = document.createElement("span");
+      team.className = "event-badge-team";
+      team.textContent = event.team_max ? (event.team_max === 1 ? "👤 Solo (1)" : `👥 Team max ${event.team_max}`) : "♾️ Open / Unlimited";
+
+      const format = document.createElement("span");
+      format.className = "event-badge-format";
+      format.textContent = event.format || "Jeopardy";
+
+      const prize = document.createElement("span");
+      prize.textContent = `Prize: ${prizePreview(event)}`;
+      facts.append(ai, team, format, prize);
+      card.append(facts);
+      const registration = registrationAction(event);
+      if (registration) {
+        const link = document.createElement("a");
+        link.className = "event-register";
+        link.href = registration.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = registration.label;
+        link.setAttribute("aria-label", `${registration.label} for ${event.title}`);
+        card.append(link);
+      }
+      elements.selectedEvents.append(card);
+    });
+  }
+
+  function prizePreview(event) {
+    const value = String(event.prize_summary || "").trim();
+    if (!value) return "Not published";
+    const lines = value.split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean);
+    const money = lines.find((line) => /(?:[$€£]\s?\d|\b(?:USD|EUR|GBP|HKD|CAD|AUD)\s?[\d,]+)/i.test(line));
+    const preview = money || lines[0] || value;
+    const context = /qualif/i.test(event.title) && /prize.*final round/is.test(value)
+      ? "Finals: " : "";
+    const summary = `${context}${preview}`;
+    return summary.length > 110 ? `${summary.slice(0, 107).trimEnd()}…` : summary;
+  }
+
+  function registrationAction(event) {
+    const registration = safePublicUrl(event.registration_url);
+    const official = safePublicUrl(event.official_url);
+    if (registration && registration !== official) return {url: registration, label: "Register"};
+    if (official) return {url: official, label: "Event site"};
+    return null;
+  }
+
+  function eventSnapshot(event) {
+    const action = registrationAction(event);
+    return `<section class="event-snapshot" aria-label="Event at a glance">
+      <div class="snapshot-facts">
+        <div><span>AI status</span><strong>${escapeHtml(policyLabel(event))}</strong></div>
+        <div><span>Prizes</span><strong>${escapeHtml(prizePreview(event))}</strong></div>
+        <div><span>Registration</span><strong>${escapeHtml(display(event.registration_status, action?.label || "Not published"))}</strong></div>
+      </div>
+      ${action ? `<a class="snapshot-action" href="${escapeHtml(action.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(action.label)} <span aria-hidden="true">↗</span></a>` : ""}
+    </section>`;
   }
 
   function policyLabel(event) {
@@ -441,6 +537,8 @@
   }
 
   function eventStatus(event) {
+    if (event.status === "cancelled") return "Cancelled";
+    if (event.status === "tentative") return "Tentative: confirm schedule";
     const now = Date.now();
     if (now >= new Date(event.finishes_at).getTime()) return "Finished";
     if (now >= new Date(event.starts_at).getTime()) return "Live now";
@@ -455,20 +553,41 @@
       .replace(".000", "");
   }
 
+  function icsText(value) {
+    return String(value).replaceAll("\\", "\\\\").replace(/\r\n|\r|\n/g, "\\n")
+      .replaceAll(",", "\\,").replaceAll(";", "\\;");
+  }
+
+  function foldIcs(line) {
+    const encoder = new TextEncoder();
+    let current = "", bytes = 0;
+    const folded = [];
+    for (const character of line) {
+      const length = encoder.encode(character).length;
+      if (bytes + length > 75) { folded.push(current); current = " "; bytes = 1; }
+      current += character; bytes += length;
+    }
+    folded.push(current);
+    return folded.join("\r\n");
+  }
+
   function icsLink(event) {
     const body = [
       "BEGIN:VCALENDAR",
       "VERSION:2.0",
       `PRODID:-//${brand.productName.replace(/[^a-z0-9 ]/gi, " ")} //CTF Calendar//EN`,
       "BEGIN:VEVENT",
-      `UID:${event.event_key}@flagwatch`,
+      `UID:${icsText(event.event_key)}@flagwatch.local`,
+      `DTSTAMP:${icsTimestamp(new Date())}`,
+      `STATUS:${event.status === "cancelled" ? "CANCELLED" : event.status === "tentative" ? "TENTATIVE" : "CONFIRMED"}`,
       `DTSTART:${icsTimestamp(event.starts_at)}`,
       `DTEND:${icsTimestamp(event.finishes_at)}`,
-      `SUMMARY:${event.title.replaceAll("\n", " ")}`,
-      `URL:${event.official_url}`,
+      `SUMMARY:${icsText(event.title)}`,
+      `URL:${icsText(event.official_url)}`,
+      "TRANSP:TRANSPARENT",
       "END:VEVENT",
       "END:VCALENDAR",
-    ].join("\r\n");
+    ].map(foldIcs).join("\r\n") + "\r\n";
     return `data:text/calendar;charset=utf-8,${encodeURIComponent(body)}`;
   }
 
@@ -477,14 +596,14 @@
   }
 
   function policyClass(event) {
-    if (event.ai_policy === "human_only" && policyIsConfirmed(event)) return "banned";
-    if (!policyIsConfirmed(event)) return "unknown";
+    if (event.ai_policy === "human_only") return "banned";
+    if (["ai_native", "ai_assisted"].includes(event.ai_policy)) return "allowed";
+    if (!event.ai_policy || event.ai_policy === "unknown") return "unknown";
     return "";
   }
 
   function policyVerdict(event) {
     const confirmed = policyIsConfirmed(event);
-    const eligible = confirmed && ["ai_native", "ai_assisted"].includes(event.ai_policy);
     const checkedAt = event.source_checked_at
       ? `Checked ${formatDateTime(event.source_checked_at)}`
       : "Not checked yet";
@@ -500,11 +619,8 @@
         <h3 id="ai-rules-title">${escapeHtml(policyLabel(event))}</h3>
         <p class="policy-reason">${escapeHtml(display(event.ai_policy_reason, "No published AI rule was found."))}</p>
         ${event.ai_policy_evidence ? `<blockquote>${escapeHtml(event.ai_policy_evidence)}</blockquote>` : ""}
-        <p class="policy-checked">${escapeHtml(checkedAt)}</p>
-        <div class="policy-actions">
-          ${source}
-          <strong>${eligible ? "Subscribed members can be pinged" : "No Discord alert"}</strong>
-        </div>
+        <p class="policy-checked">${escapeHtml(checkedAt)}${event.recheck_due_at ? `; recheck due ${escapeHtml(formatDateTime(event.recheck_due_at))}` : ""}</p>
+        ${source ? `<div class="policy-actions">${source}</div>` : ""}
       </section>`;
   }
 
@@ -516,7 +632,8 @@
     const rulesText = rulesFound
       ? `${rulesFound} dedicated rule page${rulesFound === 1 ? "" : "s"} read.`
       : "No dedicated rules page found.";
-    const alertAllowed = ["ai_native", "ai_assisted"].includes(event.ai_policy) &&
+    const alertAllowed = event.status !== "cancelled" &&
+      ["ai_native", "ai_assisted"].includes(event.ai_policy) &&
       policyIsConfirmed(event);
     const decision = alertAllowed ? "Verified, alerts allowed" : "Unverified, no alert";
     const decisionDetail = alertAllowed
@@ -684,6 +801,49 @@
     return "Online";
   }
 
+  function priority(event) {
+    const geo = {st_louis: 30, missouri: 20, usa: 10}[event.assessment?.location?.geography] || 0;
+    const longRunning = new Date(event.finishes_at) - new Date(event.starts_at) > 30 * 86400000;
+    return geo + (policyIsConfirmed(event) && event.ai_policy !== "human_only" ? 100 : 0) - (longRunning ? 10 : 0);
+  }
+
+  function evidenceState(field) {
+    return {corroborated: "Corroborated across sources", single_source: "One source only", conflicting: "Sources disagree", unknown: "Not established"}[field?.state] || "Not established";
+  }
+
+  function assessmentDetails(event) {
+    const a = event.assessment;
+    if (!a) return `<section class="assessment-panel"><h3>Verification pending</h3><p>This event is waiting for its field-by-field check.</p></section>`;
+    const labels = {ai_policy: "AI rules", prizes: "Prizes and rewards", participation: "Field size", location: "Location", dates: "Schedule"};
+    const fields = Object.entries(labels).map(([key, label]) => {
+      const field = a[key] || {};
+      const value = key === "prizes" ? display(field.summary, field.reward_state === "none" ? "No reward published in cited evidence" : "Rewards not established")
+        : key === "participation" ? (field.count != null ? `${field.count} ${field.kind || "entries"}` : "Size not published")
+        : key === "location" ? display(field.place, "Physical location not established")
+        : key === "ai_policy" ? policyLabel(event) : `${formatDateTime(event.starts_at)} to ${formatDateTime(event.finishes_at)}`;
+      const proofs = (field.evidence || []).filter(e => safePublicUrl(e.source_url)).map(e => `<li><a href="${escapeHtml(safePublicUrl(e.source_url))}" target="_blank" rel="noopener noreferrer">Source</a>${e.checked_at ? `, checked ${escapeHtml(formatDateTime(e.checked_at))}` : ""}<p>${e.kind === "record" ? "Source record: " : "Quote: "}${escapeHtml(e.quote || "")}</p></li>`).join("");
+      return `<article class="assessment-field"><h4>${label}</h4><p>${escapeHtml(value)}</p><strong>${escapeHtml(evidenceState(field))}${event.analysis_stale ? "; recheck needed" : ""}</strong>${proofs ? `<details><summary>Evidence</summary><ul>${proofs}</ul></details>` : ""}</article>`;
+    }).join("");
+    return `<section class="assessment-panel" aria-labelledby="assessment-heading"><h3 id="assessment-heading">Evidence check</h3><p>Two matching reads of one page do not count as independent corroboration. Missing or conflicting evidence stays labeled.</p><div class="assessment-grid">${fields}</div></section>`;
+  }
+
+  function competitionScenario(event) {
+    const field = event.assessment?.participation;
+    const count = field?.kind === "teams" && field?.count > 1 ? field.count : "";
+    return `<section class="assessment-panel" aria-labelledby="odds-heading"><h3 id="odds-heading">Team winning scenario</h3><p>Actual winning odds are not calibrated. This calculator shows what a comparable field could imply, using the public WATCHLIST result as a single historical anchor.</p><p><a href="https://ctf.xposedornot.com/scoreboard" target="_blank" rel="noopener noreferrer">Historical result: fourth among 213 scoring teams</a>. One result cannot establish repeatable team strength.</p><label for="scenario-field">${count ? "Published team count, editable scenario" : "Assumed competing teams (no verified team count available)"}</label><input id="scenario-field" type="number" min="2" max="100000" step="1" value="${count}" placeholder="Enter a field size"><label for="scenario-strength">Relative performance assumption</label><select id="scenario-strength"><option value="1">Repeat historical relative performance</option><option value="0.25">Much tougher field: quarter of that strength</option><option value="4">Much easier field: four times that strength</option><option value="baseline">Equal-strength baseline</option></select><p id="scenario-result" aria-live="polite">Enter an assumed field size to calculate a scenario.</p><details><summary>Method and limits</summary><p>The historical rank sets relative strength to (213 - 4) / (4 - 1). A Plackett-Luce scenario gives first-place probability strength / (strength + teams - 1). The easier and tougher options are assumptions, not confidence bounds. Opponent quality, event format, team limits, available members, AI rules and eligibility can change the outcome. Prize chances also depend on award rules. No automatic team-performance bonus is assumed. <a href="https://hturner.r-universe.dev/PlackettLuce/doc/Overview.html" target="_blank" rel="noopener noreferrer">Ranking model reference</a>.</p></details></section>`;
+  }
+
+  function updateScenario() {
+    const n = Number(document.querySelector("#scenario-field")?.value);
+    const choice = document.querySelector("#scenario-strength")?.value;
+    const out = document.querySelector("#scenario-result");
+    if (!out) return;
+    if (!Number.isInteger(n) || n < 2 || n > 100000) { out.textContent = "Enter a whole field size from 2 to 100,000."; return; }
+    const strength = choice === "baseline" ? 1 : (213 - 4) / (4 - 1) * Number(choice);
+    const probability = 100 * strength / (strength + n - 1);
+    out.textContent = `Illustrative first-place scenario: ${probability < 1 ? probability.toFixed(1) : Math.round(probability)}%. Uncalibrated; not a prediction or a confidence interval.`;
+  }
+
   function openEvent(event, updateHistory = true) {
     elements.eventTitle.textContent = event.title;
     const details = [
@@ -701,26 +861,34 @@
       ["Registration", display(event.registration_status)],
       ["Categories", display(event.categories)],
       ["Organizers", display(event.organizers)],
-      ["Participants", display(event.participants)],
+      [event.source_refs?.some(ref => ref.source === "hack-the-box-public") ? "Registered players" : "CTFtime interest", display(event.participants)],
       ["Platform", display(event.platform)],
     ];
     const links = [
       [event.official_url, "Official event"],
-      [event.registration_url, "Registration"],
+      [event.registration_url, "Registration link"],
       [event.ctftime_url, "CTFtime listing"],
     ].filter(([url]) => safePublicUrl(url));
     elements.eventBody.innerHTML = `
+      ${eventSnapshot(event)}
       ${policyVerdict(event)}
-      ${scanLedger(event)}
-      ${conflictWarnings(event)}
-      ${sourceRecords(event)}
-      ${publicAnalytics(event)}
-      ${eventIntelligence(event)}
       <dl class="detail-grid">${details.map(([term, value]) => `<div class="detail-item"><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
       <nav class="event-links" aria-label="Event links">
         ${links.map(([url, label]) => `<a href="${escapeHtml(safePublicUrl(url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`).join("")}
         <a href="${icsLink(event)}" download="${slug(event.title)}.ics">Download ICS</a>
-      </nav>`;
+      </nav>
+      <details class="research-notes"><summary>Event research</summary>
+        ${assessmentDetails(event)}
+        ${competitionScenario(event)}
+        ${scanLedger(event)}
+        ${conflictWarnings(event)}
+        ${sourceRecords(event)}
+        ${publicAnalytics(event)}
+        ${eventIntelligence(event)}
+      </details>`;
+    document.querySelector("#scenario-field").addEventListener("input", updateScenario);
+    document.querySelector("#scenario-strength").addEventListener("change", updateScenario);
+    if (event.assessment?.participation?.kind === "teams") updateScenario();
     if (updateHistory) updateUrl({event: event.event_key}, "push");
     if (!elements.eventDialog.open) elements.eventDialog.showModal();
   }
@@ -804,6 +972,7 @@
       try {
         const response = await fetch(url, {
           headers: {Accept: "application/json"},
+          cache: "no-store",
           signal: controller.signal,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -819,8 +988,17 @@
     throw lastError || new Error("Calendar request failed");
   }
 
-  function applySnapshot(payload) {
-    state.events = payload.events;
+  function applySnapshot(payload, forceStale = false) {
+    state.events = payload.events.map((event) => {
+      const age = Date.now() - new Date(event.source_checked_at).getTime();
+      return {...event, analysis_stale: Boolean(forceStale || event.analysis_stale ||
+        !event.source_checked_at || !Number.isFinite(age) || (event.recheck_due_at ? Date.now() > new Date(event.recheck_due_at).getTime() : age > 48 * 3600 * 1000) || age < -300000)};
+    });
+    const sourceNames = {ctftime: "CTFtime", "hack-the-box-public": "Hack The Box", "alpacahack-calendar": "AlpacaHack", "ctfhub": "CTFHub", "uscc-cyberquests": "US Cyber Quests"};
+    const coverage = Array.isArray(payload.coverage) ? payload.coverage : [];
+    document.querySelector("#source-coverage").textContent = coverage.length
+      ? "Connected sources: " + coverage.map((source) => `${sourceNames[source.name] || source.name} (${source.status === "ok" ? "updated" : source.status === "empty" ? "no events returned" : "needs recheck"})`).join("; ") + ". No single feed covers every CTF."
+      : "";
     state.scanSummary = payload.scan_summary || null;
     state.generatedAt = payload.generated_at;
     renderScanSummary();
@@ -831,28 +1009,34 @@
 
   async function loadEvents() {
     const apiBase = String(window.FLAGWATCH_API_BASE || "").replace(/\/$/, "");
-    try {
-      const payload = await fetchSnapshot(`${apiBase}/api/events`);
-      saveSnapshot(payload);
-      applySnapshot(payload);
-      elements.status.textContent = `Times shown in ${state.timeZone}.`;
-    } catch (_) {
-      const cached = readSnapshot();
-      if (cached) {
-        applySnapshot(cached);
-        elements.status.textContent = `Showing saved calendar data from ${formatDateTime(cached.generated_at)}. Live refresh is temporarily unavailable. Times shown in ${state.timeZone}.`;
+    for (const [route, url] of [["live", `${apiBase}/api/events`], ["recovery", `${apiBase}/recovery/events.json`]]) {
+      try {
+        const payload = await fetchSnapshot(url);
+        if (route === "live") saveSnapshot(payload);
+        applySnapshot(payload, route !== "live");
+        elements.status.textContent = route === "live"
+          ? `Times shown in ${state.timeZone}.`
+          : `Showing saved server data from ${formatDateTime(payload.generated_at)}. Live feed unavailable; details need rechecking. Times shown in ${state.timeZone}.`;
         return;
+      } catch (_) {
+        // Try the next explicit route; saved data never acquires a fresh timestamp.
       }
-      elements.status.textContent = "The calendar feed is unavailable right now. Please try again shortly.";
-      renderCalendar();
     }
+    const cached = readSnapshot();
+    if (cached) {
+      applySnapshot(cached, true);
+      elements.status.textContent = `Showing saved calendar data from ${formatDateTime(cached.generated_at)}. Live refresh is temporarily unavailable. Times shown in ${state.timeZone}.`;
+      return;
+    }
+    elements.status.textContent = "The calendar feed and saved copies are unavailable right now. Please try again shortly.";
+    renderCalendar();
   }
 
   function renderScanSummary() {
-    const summary = state.scanSummary || {
-      sources_read: state.events.filter((event) => event.source_scan_status === "read").length,
+    const summary = {
+      sources_read: state.events.filter((event) => event.source_scan_status === "read" && !event.analysis_stale).length,
       sources_need_recheck: state.events.filter(
-        (event) => event.source_scan_status !== "read",
+        (event) => event.source_scan_status !== "read" || event.analysis_stale,
       ).length,
       policies_confirmed: state.events.filter(
         (event) => ["ai_native", "ai_assisted"].includes(event.ai_policy) &&
@@ -866,6 +1050,53 @@
     elements.scanSources.textContent = `${summary.sources_read} source${summary.sources_read === 1 ? "" : "s"}`;
     elements.scanRecheck.textContent = `${summary.sources_need_recheck} need recheck`;
     elements.scanConfirmed.textContent = `${summary.policies_confirmed} confirmed`;
+  }
+
+  function syncFilterChips() {
+    document.querySelectorAll(".filter-chip").forEach((chip) => {
+      const filter = chip.dataset.filter;
+      const value = chip.dataset.value;
+      if (filter && value) {
+        chip.classList.toggle("active", state[filter] === value);
+      }
+    });
+  }
+
+  document.querySelector("#event-search").addEventListener("input", (event) => {
+    state.query = event.target.value.trim().toLowerCase();
+    renderCalendar();
+    if (state.selectedDate) renderDayEvents();
+  });
+
+  document.querySelectorAll(".filter-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const filter = chip.dataset.filter;
+      const value = chip.dataset.value;
+      if (!filter || !value) return;
+      state[filter] = value;
+      if (filter === "policy") {
+        const select = document.querySelector("#policy-filter");
+        if (select) select.value = value;
+      } else if (filter === "teamSize") {
+        const select = document.querySelector("#team-filter");
+        if (select) select.value = value;
+      }
+      syncFilterChips();
+      renderCalendar();
+      if (state.selectedDate) renderDayEvents();
+    });
+  });
+
+  for (const [id, key] of [["policy-filter", "policy"], ["team-filter", "teamSize"], ["location-filter", "location"]]) {
+    const el = document.querySelector(`#${id}`);
+    if (el) {
+      el.addEventListener("change", (event) => {
+        state[key] = event.target.value;
+        syncFilterChips();
+        renderCalendar();
+        if (state.selectedDate) renderDayEvents();
+      });
+    }
   }
 
   document.querySelector("#previous-month").addEventListener("click", () => setMonth(-1));
@@ -925,4 +1156,10 @@
   }
   updateUrl();
   loadEvents();
+  if ("serviceWorker" in navigator && !window.FLAGWATCH_API_BASE) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Browsers may disable storage. The network calendar still works.
+    });
+  }
+  setInterval(() => { if (!document.hidden && !elements.eventDialog.open) loadEvents(); }, 60000);
 })();
