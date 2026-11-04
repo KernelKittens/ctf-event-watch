@@ -18,6 +18,7 @@ class OutboxRecord:
     status: str
     attempts: int
     last_error: str | None
+    receipt_id: str | None = None
 
 
 class Database:
@@ -79,6 +80,10 @@ class Database:
                 );
                 """
             )
+
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(outbox)")}
+            if "receipt_id" not in columns:
+                connection.execute("ALTER TABLE outbox ADD COLUMN receipt_id TEXT")
 
     def backup_to(self, destination: str | Path) -> None:
         """Write a self-contained SQLite backup, including committed WAL pages."""
@@ -171,6 +176,36 @@ class Database:
             ),
         )
 
+    def find_event_alias(self, event: Event | str) -> EventView | None:
+        """Resolve stable source record IDs across changes in source precedence."""
+        key = event.key if isinstance(event, Event) else event
+        exact = self.get_event(key)
+        if exact is not None:
+            return exact
+        aliases = {key}
+        if isinstance(event, Event):
+            aliases.update(
+                f"{ref.source}:{ref.record_id}"
+                for ref in event.source_refs
+                if ref.record_id is not None
+            )
+        matches = [
+            view
+            for view in self.list_events()
+            if aliases
+            & {
+                view.event.key,
+                *(
+                    f"{ref.source}:{ref.record_id}"
+                    for ref in view.event.source_refs
+                    if ref.record_id is not None
+                ),
+            }
+        ]
+        if len(matches) > 1:
+            raise ValueError("Ambiguous source identity requires review")
+        return matches[0] if matches else None
+
     def get_criteria(self) -> Criteria:
         with self._connect() as connection:
             row = connection.execute(
@@ -209,7 +244,16 @@ class Database:
                 """,
                 (dedupe_key, event_key, channel, payload_json),
             )
-            return cursor.rowcount == 1
+            inserted = cursor.rowcount == 1
+            if inserted:
+                connection.execute(
+                    "UPDATE outbox SET status = 'suppressed', "
+                    "last_error = 'Superseded by a newer revision' "
+                    "WHERE event_key = ? AND channel = ? AND dedupe_key != ? "
+                    "AND status = 'pending'",
+                    (event_key, channel, dedupe_key),
+                )
+            return inserted
 
     def count_outbox(self) -> int:
         with self._connect() as connection:
@@ -220,7 +264,8 @@ class Database:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, event_key, channel, payload_json, status, attempts, last_error
+                SELECT id, event_key, channel, payload_json, status, attempts,
+                    last_error, receipt_id
                 FROM outbox
                 WHERE status = 'pending'
                 ORDER BY id
@@ -235,6 +280,7 @@ class Database:
                 status=str(row["status"]),
                 attempts=int(row["attempts"]),
                 last_error=str(row["last_error"]) if row["last_error"] else None,
+                receipt_id=str(row["receipt_id"]) if row["receipt_id"] else None,
             )
             for row in rows
         ]
@@ -243,7 +289,8 @@ class Database:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, event_key, channel, payload_json, status, attempts, last_error
+                SELECT id, event_key, channel, payload_json, status, attempts,
+                    last_error, receipt_id
                 FROM outbox
                 ORDER BY id DESC
                 """
@@ -257,15 +304,34 @@ class Database:
                 status=str(row["status"]),
                 attempts=int(row["attempts"]),
                 last_error=str(row["last_error"]) if row["last_error"] else None,
+                receipt_id=str(row["receipt_id"]) if row["receipt_id"] else None,
             )
             for row in rows
         ]
 
-    def mark_outbox_sent(self, record_id: int) -> None:
+    def claim_outbox(self, record_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE outbox SET status = 'sending' WHERE id = ? AND status = 'pending'",
+                (record_id,),
+            )
+            return cursor.rowcount == 1
+
+    def mark_outbox_uncertain(self, record_id: int) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE outbox SET status = 'sent', attempts = attempts + 1 WHERE id = ?",
+                "UPDATE outbox SET status = 'uncertain', attempts = attempts + 1, "
+                "last_error = 'Delivery outcome unknown; inspect destination before retry' "
+                "WHERE id = ?",
                 (record_id,),
+            )
+
+    def mark_outbox_sent(self, record_id: int, receipt_id: str | None = None) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE outbox SET status = 'sent', attempts = attempts + 1, receipt_id = ? "
+                "WHERE id = ?",
+                (receipt_id, record_id),
             )
 
     def mark_outbox_suppressed(self, record_id: int, reason: str) -> None:
@@ -284,7 +350,7 @@ class Database:
             connection.execute(
                 """
                 UPDATE outbox
-                SET attempts = attempts + 1, last_error = ?
+                SET status = 'pending', attempts = attempts + 1, last_error = ?
                 WHERE id = ?
                 """,
                 (error[:500], record_id),

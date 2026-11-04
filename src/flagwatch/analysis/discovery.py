@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, fie
 
 from flagwatch.analysis.evidence import EvidenceDocument
 from flagwatch.analysis.llm import normalize_model_text
-from flagwatch.analysis.providers import ModelConnector
+from flagwatch.analysis.providers import ModelConnector, complete_validated
 
 
 class DiscoveredWatchEvent(BaseModel):
@@ -71,14 +71,8 @@ class WatchPageDiscoveryExtractor:
             f"APPROVED URLS:\n" + "\n".join(sorted(approved)) + "\n\n"
             f"PAGE TEXT:\n{document.text[:40_000]}"
         )
-        try:
-            raw = self.connector.complete(
-                system_prompt,
-                user_prompt,
-                WatchDiscoveryResponse.model_json_schema(),
-            )
-            if not isinstance(raw, str):
-                return []
+
+        def validate(raw: str) -> WatchDiscoveryResponse:
             normalized = normalize_model_text(raw).strip()
             if normalized.startswith("```json"):
                 normalized = normalized[7:]
@@ -86,7 +80,18 @@ class WatchPageDiscoveryExtractor:
                 normalized = normalized[3:]
             if normalized.endswith("```"):
                 normalized = normalized[:-3]
-            response = WatchDiscoveryResponse.model_validate(json.loads(normalized.strip()))
+            return WatchDiscoveryResponse.model_validate(json.loads(normalized.strip()))
+
+        try:
+            response = complete_validated(
+                self.connector,
+                system_prompt,
+                user_prompt,
+                WatchDiscoveryResponse.model_json_schema(),
+                validate,
+            )
+            if response is None:
+                return []
         except (json.JSONDecodeError, TypeError, ValueError, ValidationError):
             return []
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import socket
+import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -78,32 +80,55 @@ class GuardedFetcher:
         current = url
         for redirect_count in range(self.max_redirects + 1):
             validate_public_url(current, self.resolver)
-            response = self.client.get(
+            with self.client.stream(
+                "GET",
                 current,
                 follow_redirects=False,
                 headers={
-                    "User-Agent": "Flagwatch/0.1 personal CTF research",
+                    "User-Agent": "Flagwatch/0.2 personal CTF research",
                     "Accept": (
-                        "text/html,text/plain,application/json,text/calendar,"
-                        "application/xml,application/javascript,text/javascript;q=0.9"
+                        "text/html,text/plain,application/json,"
+                        "text/calendar,application/pdf,*/*;q=0.5"
                     ),
                 },
+            ) as response:
+                if response.status_code in REDIRECT_STATUSES:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise FetchError("Redirect response did not include a destination")
+                    if redirect_count == self.max_redirects:
+                        raise FetchError("Source exceeded the redirect limit")
+                    current = urljoin(current, location)
+                    continue
+                response.raise_for_status()
+                declared = response.headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > self.max_bytes:
+                    raise ResponseTooLargeError("Source page exceeds the size limit")
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    if len(content) + len(chunk) > self.max_bytes:
+                        raise ResponseTooLargeError("Source page exceeds the size limit")
+                    content.extend(chunk)
+            response = httpx.Response(
+                200,
+                headers={"content-type": response.headers.get("content-type", "")},
+                content=bytes(content),
             )
-            if response.status_code in REDIRECT_STATUSES:
-                location = response.headers.get("location")
-                if not location:
-                    raise FetchError("Redirect response did not include a destination")
-                if redirect_count == self.max_redirects:
-                    raise FetchError("Source exceeded the redirect limit")
-                current = urljoin(current, location)
-                continue
-            response.raise_for_status()
-            declared_length = response.headers.get("content-length")
-            if declared_length and int(declared_length) > self.max_bytes:
-                raise ResponseTooLargeError("Source page exceeds the size limit")
-            if len(response.content) > self.max_bytes:
-                raise ResponseTooLargeError("Source page exceeds the size limit")
             media_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+            if media_type == "application/pdf":
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "flagwatch.pdf_text"],
+                        input=bytes(content),
+                        capture_output=True,
+                        timeout=8,
+                        check=True,
+                    )
+                except (subprocess.SubprocessError, OSError) as error:
+                    raise UnsupportedContentError(
+                        "PDF text could not be safely extracted"
+                    ) from error
+                return FetchedPage(url=current, text=result.stdout.decode("utf-8"), html=None)
             if media_type not in {
                 "text/html",
                 "text/plain",

@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from pydantic import HttpUrl
 
-from flagwatch.domain import Event, EventFacts, ScheduleMode, SourceKind, SourceRef
+from flagwatch.domain import Event, EventFacts, EventStatus, ScheduleMode, SourceKind, SourceRef
 from flagwatch.rule_pages import extract_readable_text
 from flagwatch.sources import EventBatch
 
@@ -81,6 +81,7 @@ def normalize_ctftime_event(
     event = Event(
         source="ctftime",
         source_id=str(payload["id"]),
+        status=EventStatus.CANCELLED if payload.get("cancelled") is True else EventStatus.SCHEDULED,
         title=str(payload["title"]).strip(),
         official_url=HttpUrl(str(payload["url"])),
         ctftime_url=HttpUrl(str(payload["ctftime_url"])),

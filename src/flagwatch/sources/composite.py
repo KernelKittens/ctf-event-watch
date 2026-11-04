@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import HttpUrl
 
 from flagwatch.domain import Event, EventFacts, SourceConflict, SourceRef
-from flagwatch.sources import EventBatch
+from flagwatch.sources import EventBatch, SourceHealth
 
 
 class RankedEventSource(Protocol):
@@ -27,7 +27,7 @@ class _Candidate:
     precedence: int
 
 
-SAFETY_EVENT_FIELDS = ("starts_at", "finishes_at", "registration_url")
+SAFETY_EVENT_FIELDS = ("starts_at", "finishes_at", "registration_url", "status")
 DISPLAY_EVENT_FIELDS = (
     "format",
     "platform",
@@ -70,7 +70,6 @@ def _normalized_text(value: str) -> str:
 def _event_urls(event: Event) -> set[str]:
     values = {
         _canonical_url(event.official_url),
-        _canonical_url(event.primary_source_url),
         _canonical_url(event.registration_url),
     }
     return {value for value in values if value}
@@ -81,10 +80,12 @@ def _time_ranges_overlap(left: Event, right: Event) -> bool:
 
 
 def _same_identity(left: Event, right: Event) -> bool:
-    if _event_urls(left) & _event_urls(right):
-        return True
+    if left.source == right.source:
+        return left.source_id == right.source_id
     if _normalized_text(left.title) != _normalized_text(right.title):
         return False
+    if _event_urls(left) & _event_urls(right) and _time_ranges_overlap(left, right):
+        return True
     left_organizers = {_normalized_text(value) for value in left.organizers if value.strip()}
     right_organizers = {_normalized_text(value) for value in right.organizers if value.strip()}
     return bool(left_organizers & right_organizers) and _time_ranges_overlap(left, right)
@@ -229,13 +230,30 @@ class CompositeSource:
     def fetch_events(self, start: datetime, finish: datetime) -> EventBatch:
         candidates: list[_Candidate] = []
         failures: list[str] = []
+        cancelled_keys: list[str] = []
+        health: list[SourceHealth] = []
         for source in self.sources:
             try:
                 batch = source.fetch_events(start, finish)
             except Exception as error:
                 failures.append(f"{source.source_name}: {type(error).__name__}")
+                health.append(SourceHealth(name=source.source_name, failures=1, status="failed"))
                 continue
+            health.append(
+                SourceHealth(
+                    name=source.source_name,
+                    events=len(batch.events),
+                    route=getattr(source, "last_route", "primary"),
+                    failures=len(batch.failures),
+                    status=(
+                        ("partial" if batch.events else "failed")
+                        if batch.failures
+                        else ("ok" if batch.events else "empty")
+                    ),
+                )
+            )
             failures.extend(batch.failures)
+            cancelled_keys.extend(batch.cancelled_keys)
             for event, facts in batch.events:
                 incoming = _Candidate(
                     event=event.model_copy(deep=True),
@@ -260,4 +278,6 @@ class CompositeSource:
             ((candidate.event, candidate.facts) for candidate in candidates),
             key=lambda item: (item[0].starts_at, item[0].key),
         )
-        return EventBatch(events=events, failures=failures)
+        return EventBatch(
+            events=events, failures=failures, cancelled_keys=cancelled_keys, source_health=health
+        )

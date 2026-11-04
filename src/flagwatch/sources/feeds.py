@@ -10,7 +10,7 @@ import httpx
 from icalendar import Calendar
 from pydantic import HttpUrl
 
-from flagwatch.domain import Event, EventFacts, ScheduleMode, SourceKind, SourceRef
+from flagwatch.domain import Event, EventFacts, EventStatus, ScheduleMode, SourceKind, SourceRef
 from flagwatch.fetching import FetchError, GuardedFetcher
 from flagwatch.rule_pages import extract_readable_text
 from flagwatch.sources import EventBatch
@@ -18,12 +18,16 @@ from flagwatch.sources import EventBatch
 
 def _aware_datetime(value: object) -> datetime:
     if isinstance(value, datetime):
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("event time must include a timezone")
+        return value
     if isinstance(value, date):
         return datetime.combine(value, time.min, tzinfo=UTC)
     if isinstance(value, str):
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("event time must include a timezone")
+        return parsed
     raise ValueError("event time is missing or invalid")
 
 
@@ -97,6 +101,9 @@ class IcsFeedSource:
         event = Event(
             source=self.source_name,
             source_id=source_id[:200],
+            status=EventStatus.CANCELLED
+            if str(component.get("STATUS", "")).upper() == "CANCELLED"
+            else EventStatus.SCHEDULED,
             title=title,
             official_url=HttpUrl(official_url),
             starts_at=starts_at,
@@ -104,6 +111,7 @@ class IcsFeedSource:
             online=online,
             onsite=bool(location) and not online,
             description=description,
+            raw={"location": location},
             organizers=_ical_organizers(component),
             primary_source_url=HttpUrl(self.url),
             source_refs=[
@@ -130,8 +138,18 @@ class IcsFeedSource:
             )
         events: list[tuple[Event, EventFacts]] = []
         failures: list[str] = []
+        cancelled_keys: list[str] = []
         for index, component in enumerate(calendar.walk("VEVENT"), start=1):
             try:
+                if str(component.get("STATUS", "")).upper() == "CANCELLED":
+                    uid = str(component.get("UID") or "").strip()
+                    if not uid:
+                        raise ValueError("Cancellation requires a UID")
+                    cancelled_keys.append(f"{self.source_name}:{uid[:200]}")
+                    if "DTSTART" not in component or "DTEND" not in component:
+                        continue
+                if component.get("RRULE") or component.get("RECURRENCE-ID"):
+                    raise ValueError("Recurring event needs explicit occurrence expansion")
                 normalized = self._normalize(component)
                 if _overlaps(normalized[0], start, finish):
                     events.append(normalized)
@@ -140,7 +158,7 @@ class IcsFeedSource:
                     f"{self.source_name} record {index}: {type(error).__name__}: invalid event data"
                 )
         events.sort(key=lambda item: (item[0].starts_at, item[0].key))
-        return EventBatch(events=events, failures=failures)
+        return EventBatch(events=events, failures=failures, cancelled_keys=cancelled_keys)
 
 
 class JsonFeedSource:
@@ -176,6 +194,10 @@ class JsonFeedSource:
         event = Event(
             source=self.source_name,
             source_id=source_id,
+            status=EventStatus.CANCELLED
+            if payload.get("cancelled") is True
+            or str(payload.get("status", "")).lower() == "cancelled"
+            else EventStatus.SCHEDULED,
             title=title,
             official_url=HttpUrl(official_url),
             starts_at=starts_at,

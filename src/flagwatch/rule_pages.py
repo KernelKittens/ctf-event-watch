@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Iterator
 from urllib.parse import urldefrag, urljoin, urlsplit
@@ -23,6 +24,16 @@ AI_POLICY_TERMS = re.compile(
     r"\b(?:artificial intelligence|large language models?|generative AI)\b",
 )
 ABSOLUTE_URL = re.compile(r"https?://[^\s\"'`<>]+", re.IGNORECASE)
+REGISTRATION_TEXT = re.compile(
+    r"\b(?:register|registration|sign[ -]?up|join\s+(?:the\s+)?(?:ctf|event|team)|"
+    r"create\s+(?:an?\s+)?account|apply\s+(?:competition|now))\b",
+    re.IGNORECASE,
+)
+REGISTRATION_PATH = re.compile(r"/(?:register|registration|sign[ -]?up|join)(?:/|$)", re.IGNORECASE)
+NON_EVENT_DESTINATIONS = {
+    "discord.com", "discord.gg", "facebook.com", "instagram.com",
+    "linkedin.com", "t.me", "twitter.com", "x.com",
+}
 
 
 def _extract_body_text(soup: BeautifulSoup) -> str:
@@ -74,8 +85,11 @@ def discover_rule_links(
     links: list[str] = []
     for anchor in soup.find_all("a", href=True):
         href = str(anchor["href"]).strip()
-        absolute, _fragment = urldefrag(urljoin(base_url, href))
-        parsed = urlsplit(absolute)
+        try:
+            absolute, _fragment = urldefrag(urljoin(base_url, href))
+            parsed = urlsplit(absolute)
+        except ValueError:
+            continue
         same_origin = parsed.netloc == base.netloc
         if (
             parsed.scheme not in {"http", "https"}
@@ -94,13 +108,66 @@ def discover_rule_links(
     return links
 
 
+def discover_registration_link(base_url: str, html: str) -> str | None:
+    """Find an explicit registration action on the organizer's event page."""
+    soup = BeautifulSoup(html, "html.parser")
+    base_host = (urlsplit(base_url).hostname or "").casefold()
+    candidates: list[tuple[int, str]] = []
+    for anchor in soup.find_all("a", href=True):
+        try:
+            absolute, _fragment = urldefrag(urljoin(base_url, str(anchor["href"]).strip()))
+            parsed = urlsplit(absolute)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "").casefold()
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if (
+            parsed.scheme != "https"
+            or not host
+            or parsed.username
+            or parsed.password
+            or host in NON_EVENT_DESTINATIONS
+            or any(host.endswith(f".{domain}") for domain in NON_EVENT_DESTINATIONS)
+            or host in {"localhost", "127.0.0.1", "0.0.0.0"}
+            or host.endswith((".local", ".internal"))
+            or (address is not None and not address.is_global)
+            or (
+                host != base_host
+                and not REGISTRATION_TEXT.search(anchor.get_text(" ", strip=True))
+            )
+        ):
+            continue
+        label = anchor.get_text(" ", strip=True)
+        if not (REGISTRATION_TEXT.search(label) or REGISTRATION_PATH.search(parsed.path)):
+            continue
+        if re.search(
+            r"\b(?:newsletter|mailing list|sponsor|volunteer|discord|workshop)\b",
+            label,
+            re.IGNORECASE,
+        ):
+            continue
+        score = 2 if REGISTRATION_TEXT.search(label) else 1
+        if re.search(r"\b(?:register now|sign[ -]?up|apply competition now)\b", label, re.I):
+            score += 2
+        if host == base_host:
+            score += 1
+        candidates.append((score, absolute))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
 def discover_script_links(base_url: str, html: str, limit: int = 3) -> list[str]:
     base = urlsplit(base_url)
     soup = BeautifulSoup(html, "html.parser")
     links: list[str] = []
     for script in soup.find_all("script", src=True):
-        absolute, _fragment = urldefrag(urljoin(base_url, str(script["src"]).strip()))
-        parsed = urlsplit(absolute)
+        try:
+            absolute, _fragment = urldefrag(urljoin(base_url, str(script["src"]).strip()))
+            parsed = urlsplit(absolute)
+        except ValueError:
+            continue
         if parsed.scheme not in {"http", "https"} or parsed.netloc != base.netloc:
             continue
         if not parsed.path.casefold().endswith((".js", ".mjs")):
@@ -178,8 +245,11 @@ def discover_embedded_rule_links(base_url: str, source: str, limit: int = 6) -> 
         if stripped.startswith(("/", "./", "../")):
             candidates.append(stripped)
         for candidate in candidates:
-            absolute, _fragment = urldefrag(urljoin(base_url, candidate.rstrip("),.;")))
-            parsed = urlsplit(absolute)
+            try:
+                absolute, _fragment = urldefrag(urljoin(base_url, candidate.rstrip("),.;")))
+                parsed = urlsplit(absolute)
+            except ValueError:
+                continue
             same_origin = parsed.netloc == base.netloc
             if (
                 parsed.scheme not in {"http", "https"}
@@ -209,8 +279,11 @@ def discover_sitemap_rule_links(base_url: str, xml: str, limit: int = 6) -> list
     for element in root.iter():
         if element.tag.rsplit("}", 1)[-1].casefold() != "loc" or not element.text:
             continue
-        absolute, _fragment = urldefrag(urljoin(base_url, element.text.strip()))
-        parsed = urlsplit(absolute)
+        try:
+            absolute, _fragment = urldefrag(urljoin(base_url, element.text.strip()))
+            parsed = urlsplit(absolute)
+        except ValueError:
+            continue
         if parsed.scheme not in {"http", "https"} or parsed.netloc != base.netloc:
             continue
         if not any(keyword in parsed.path.casefold() for keyword in RULE_KEYWORDS):

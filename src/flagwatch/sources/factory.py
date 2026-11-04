@@ -16,10 +16,15 @@ from flagwatch.domain import Event
 from flagwatch.fetching import GuardedFetcher, Resolver, resolve_public_addresses
 from flagwatch.sources.composite import CompositeSource, RankedEventSource
 from flagwatch.sources.ctfd import CtfdSource
+from flagwatch.sources.ctfhub import CtfHubSource
 from flagwatch.sources.ctftime import CtftimeSource
+from flagwatch.sources.fallback import FallbackSource
 from flagwatch.sources.feeds import IcsFeedSource, JsonFeedSource
+from flagwatch.sources.htb import HtbSource
 from flagwatch.sources.rctf import RctfSource
+from flagwatch.sources.uscc import UsccSource
 from flagwatch.sources.watch_page import WatchPageSource
+from flagwatch.storage import Database
 
 
 class SourceDefinitionBase(BaseModel):
@@ -27,6 +32,18 @@ class SourceDefinitionBase(BaseModel):
 
     name: str = Field(min_length=1, max_length=120)
     enabled: bool = True
+
+
+class HtbSourceDefinition(SourceDefinitionBase):
+    kind: Literal["htb_public"]
+
+
+class CtfHubSourceDefinition(SourceDefinitionBase):
+    kind: Literal["ctfhub"]
+
+
+class UsccSourceDefinition(SourceDefinitionBase):
+    kind: Literal["uscc"]
 
 
 class IcsSourceDefinition(SourceDefinitionBase):
@@ -95,7 +112,10 @@ class RctfSourceDefinition(SourceDefinitionBase):
 
 
 SourceDefinition = Annotated[
-    IcsSourceDefinition
+    HtbSourceDefinition
+    | CtfHubSourceDefinition
+    | UsccSourceDefinition
+    | IcsSourceDefinition
     | JsonSourceDefinition
     | WatchSourceDefinition
     | CtfdSourceDefinition
@@ -155,12 +175,34 @@ def build_event_source(
 ) -> CompositeSource:
     sources: list[RankedEventSource] = []
     if settings.ctftime_enabled:
-        sources.append(CtftimeSource(source_client, str(settings.ctftime_base_url)))
+        primary = CtftimeSource(source_client, str(settings.ctftime_base_url))
+        if settings.resilience_enabled:
+            mirror = IcsFeedSource(
+                "https://raw.githubusercontent.com/ProbiusOfficial/Hello-CTFtime/main/calendar/Global.ics",
+                fetcher,
+                "hello-ctftime-mirror",
+            )
+            sources.append(FallbackSource(primary, mirror, Database(settings.database_path)))
+        else:
+            sources.append(primary)
     definitions = load_source_definitions(settings.sources_json, settings.sources_path)
     for definition in definitions:
         if not definition.enabled:
             continue
-        if isinstance(definition, IcsSourceDefinition):
+        if isinstance(definition, HtbSourceDefinition):
+            sources.append(HtbSource())
+        elif isinstance(definition, CtfHubSourceDefinition):
+            sources.append(
+                CtfHubSource(
+                    source_client,
+                    name=definition.name,
+                    resolver=resolver,
+                    max_bytes=fetcher.max_bytes,
+                )
+            )
+        elif isinstance(definition, UsccSourceDefinition):
+            sources.append(UsccSource(fetcher=fetcher, name=definition.name))
+        elif isinstance(definition, IcsSourceDefinition):
             sources.append(IcsFeedSource(str(definition.url), fetcher, definition.name))
         elif isinstance(definition, JsonSourceDefinition):
             sources.append(JsonFeedSource(str(definition.url), fetcher, definition.name))

@@ -31,9 +31,16 @@ ASSISTED_ALLOW = re.compile(
     r"\b(?:allowed|permitted|fine)\b)",
     re.IGNORECASE,
 )
+DOCUMENTED_AI_SOLVING = re.compile(
+    r"\bif\s+ai\s+is\s+used\s+to\s+solve\s+(?:the\s+)?challenges?\b"
+    r".{0,180}\bwrite[- ]up\b",
+    re.IGNORECASE,
+)
 SOLVING_PROHIBITION = re.compile(
-    r"(?:\bno\s+(?:llms?|ai assistants?)\b.{0,72}\bsolv|"
-    r"\b(?:all\s+)?ai usage\b.{0,40}\b(?:prohibited|forbidden|not allowed)\b|"
+    r"(?:\bif\s+ai\s+is\s+used\s+to\s+solve\b.{0,120}\bdisqualif|"
+    r"\bno\s+(?:llms?|ai assistants?)\b.{0,72}\bsolv|"
+    r"\b(?:all\s+)?(?:ai usage|ai use|use of ai|artificial intelligence)\b"
+    r".{0,40}\b(?:prohibited|forbidden|not allowed)\b|"
     r"\b(?:llms?|ai assistants?|ai tools?)\b.{0,72}\b(?:prohibited|forbidden|not allowed)\b|"
     r"\bchallenge (?:details|material)\b.{0,72}\bmust not\b.{0,40}\bai\b|"
     r"\bmust not\b.{0,72}\bchallenge (?:details|material)\b.{0,40}\bai\b|"
@@ -68,7 +75,10 @@ def classify_ai_policy(documents: Sequence[EvidenceDocument]) -> PolicyResult:
     sentences = [item for document in documents for item in _sentences(document)]
     relevant = [(source, text) for source, text in sentences if AI_TERMS.search(text)]
     native = [(source, text) for source, text in relevant if NATIVE_ALLOW.search(text)]
-    assisted = [(source, text) for source, text in relevant if ASSISTED_ALLOW.search(text)]
+    assisted = [
+        (source, text) for source, text in relevant
+        if ASSISTED_ALLOW.search(text) or DOCUMENTED_AI_SOLVING.search(text)
+    ]
     prohibited = [(source, text) for source, text in relevant if SOLVING_PROHIBITION.search(text)]
     automation_limited = [
         (source, text) for source, text in sentences if AUTOMATION_LIMIT.search(text)
@@ -98,6 +108,8 @@ def classify_ai_policy(documents: Sequence[EvidenceDocument]) -> PolicyResult:
         reason = (
             "Interactive AI is allowed, but automated solving is restricted"
             if automation_limited
+            else "AI use has write-up requirements"
+            if DOCUMENTED_AI_SOLVING.search(text)
             else "Interactive AI assistance is allowed"
         )
         return PolicyResult(

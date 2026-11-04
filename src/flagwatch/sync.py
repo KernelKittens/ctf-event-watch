@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -13,19 +14,30 @@ from pydantic import BaseModel, Field
 from flagwatch.analysis.evidence import EvidenceDocument
 from flagwatch.analysis.facts import extract_event_facts
 from flagwatch.analysis.llm import LlmPolicyResponse, normalize_model_text
-from flagwatch.domain import AiPolicy, Event, EventFacts, IntelClaim, SourceScanStatus
+from flagwatch.assessment import assess_event
+from flagwatch.domain import (
+    AiPolicy,
+    AssessmentState,
+    Event,
+    EventFacts,
+    EventStatus,
+    IntelClaim,
+    RecommendationStatus,
+    SourceScanStatus,
+)
 from flagwatch.fetching import FetchedPage, FetchError
 from flagwatch.matching import match_event
 from flagwatch.notifications import queue_alert
 from flagwatch.rule_pages import (
     discover_embedded_rule_links,
+    discover_registration_link,
     discover_rule_links,
     discover_script_links,
     discover_sitemap_rule_links,
     extract_javascript_evidence,
     has_readable_body,
 )
-from flagwatch.sources import EventBatch
+from flagwatch.sources import EventBatch, SourceHealth
 from flagwatch.storage import Database
 
 
@@ -44,12 +56,15 @@ class PolicyExtractor(Protocol):
 
 
 class SyncReport(BaseModel):
+    source_health: list[SourceHealth] = Field(default_factory=list)
     imported: int = 0
     analyzed: int = 0
     queued: int = 0
     failures: list[str] = Field(default_factory=list)
     verified_policies: int = 0
     unverified_policies: int = 0
+    deferred: int = 0
+    skipped: int = 0
 
 
 @dataclass(frozen=True)
@@ -60,9 +75,24 @@ class SourceScan:
     reason: str
     pages_checked: int
     rule_pages_found: int
+    registration_url: str | None = None
 
 
 MIN_READABLE_CHARACTERS = 40
+LIVE_RECHECK_INTERVAL = timedelta(minutes=15)
+UPCOMING_RECHECK_INTERVAL = timedelta(hours=1)
+FUTURE_RECHECK_INTERVAL = timedelta(hours=6)
+PAST_RECHECK_INTERVAL = timedelta(hours=24)
+UPCOMING_WINDOW = timedelta(hours=72)
+
+
+@dataclass(frozen=True)
+class RecheckCandidate:
+    event: Event
+    seed: EventFacts
+    previous: EventFacts | None
+    priority: int
+    checked_at: datetime | None
 
 
 def _normalized_text(value: str) -> str:
@@ -107,6 +137,8 @@ class SyncService:
         lookback_days: int = 31,
         policy_extractor: PolicyExtractor | None = None,
         queue_notifications: bool = True,
+        adaptive_rechecks_enabled: bool = False,
+        max_event_scans_per_run: int = 24,
     ) -> None:
         self.database = database
         self.source = source
@@ -116,6 +148,51 @@ class SyncService:
         self.lookback_days = lookback_days
         self.policy_extractor = policy_extractor
         self.queue_notifications = queue_notifications
+        self.adaptive_rechecks_enabled = adaptive_rechecks_enabled
+        self.max_event_scans_per_run = max_event_scans_per_run
+
+    @staticmethod
+    def _recheck_priority_and_interval(event: Event, current: datetime) -> tuple[int, timedelta]:
+        if event.starts_at <= current < event.finishes_at:
+            return 0, LIVE_RECHECK_INTERVAL
+        if current < event.starts_at <= current + UPCOMING_WINDOW:
+            return 1, UPCOMING_RECHECK_INTERVAL
+        if event.starts_at > current:
+            return 2, FUTURE_RECHECK_INTERVAL
+        return 3, PAST_RECHECK_INTERVAL
+
+    @staticmethod
+    def _due(checked_at: datetime | None, current: datetime, interval: timedelta) -> bool:
+        if checked_at is None or checked_at.tzinfo is None:
+            return True
+        return checked_at > current or current - checked_at >= interval
+
+    def _select_rechecks(self, candidates: Sequence[RecheckCandidate]) -> list[RecheckCandidate]:
+        due = sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.priority,
+                candidate.checked_at or datetime.min.replace(tzinfo=UTC),
+                candidate.event.key,
+            ),
+        )
+        if len(due) <= self.max_event_scans_per_run:
+            return due
+
+        selected: list[RecheckCandidate] = []
+        selected_keys: set[str] = set()
+        for priority in range(4):
+            candidate = next((item for item in due if item.priority == priority), None)
+            if candidate is not None and len(selected) < self.max_event_scans_per_run:
+                selected.append(candidate)
+                selected_keys.add(candidate.event.key)
+        for candidate in due:
+            if len(selected) >= self.max_event_scans_per_run:
+                break
+            if candidate.event.key not in selected_keys:
+                selected.append(candidate)
+                selected_keys.add(candidate.event.key)
+        return selected
 
     def _validated_claims(
         self,
@@ -174,6 +251,8 @@ class SyncService:
         documents: Sequence[EvidenceDocument],
         previous: EventFacts | None,
     ) -> EventFacts:
+        if not any(document.text.strip() for document in documents):
+            return self._preserve_previous_intel(facts, previous)
         fingerprint = _source_fingerprint(documents)
         if (
             previous is not None
@@ -199,6 +278,17 @@ class SyncService:
         return facts.model_copy(update=updates)
 
     def _documents_for(self, event: Event) -> SourceScan:
+        if any(ref.source == "hack-the-box-public" for ref in event.source_refs):
+            # The shared app bundle contains templates for multiple AI policies.
+            # A schedule record cannot establish which template applies to this event.
+            return SourceScan(
+                documents=[],
+                failures=[],
+                status=SourceScanStatus.LIMITED,
+                reason="Public schedule collected; event-specific rules need checking",
+                pages_checked=0,
+                rule_pages_found=0,
+            )
         failures: list[str] = []
         source_text = "\n\n".join(part for part in [event.description, event.prizes] if part)
         source_url = event.primary_source_url or event.official_url
@@ -216,6 +306,7 @@ class SyncService:
                 rule_pages_found=0,
             )
         documents.append(EvidenceDocument(homepage.url, homepage.text))
+        registration_url = discover_registration_link(homepage.url, homepage.html or "")
         homepage_readable = len(homepage.text.strip()) >= MIN_READABLE_CHARACTERS and (
             homepage.html is None or has_readable_body(homepage.html, MIN_READABLE_CHARACTERS)
         )
@@ -255,12 +346,24 @@ class SyncService:
         rule_pages_found = 0
         readable_rule_pages = 0
         for rule_url in rule_urls[:6]:
+            dated_path = [
+                int(year) for year in re.findall(r"(?<![0-9])20[0-9]{2}(?![0-9])", rule_url)
+            ]
+            if dated_path and max(dated_path) < event.starts_at.year - 1:
+                continue
             if rule_url == homepage.url:
                 continue
             try:
                 rule_page = self.fetcher.get_page(rule_url)
             except (FetchError, httpx.HTTPError, OSError) as error:
                 failures.append(f"{event.title}: {rule_url}: {error}")
+                continue
+            document_years = [int(year) for year in re.findall(r"\b20[0-9]{2}\b", rule_page.text)]
+            if (
+                rule_url.lower().endswith(".pdf")
+                and document_years
+                and max(document_years) < event.starts_at.year - 1
+            ):
                 continue
             rule_pages_found += 1
             if len(rule_page.text.strip()) >= MIN_READABLE_CHARACTERS:
@@ -288,6 +391,7 @@ class SyncService:
             reason=reason,
             pages_checked=1 + script_pages_read + rule_pages_found,
             rule_pages_found=rule_pages_found,
+            registration_url=registration_url,
         )
 
     def run(self) -> SyncReport:
@@ -298,18 +402,90 @@ class SyncService:
         criteria = self.database.get_criteria()
         batch = self.source.fetch_events(start, finish)
         report.failures.extend(batch.failures)
-        for event, seed in batch.events:
+        report.source_health = batch.source_health
+        ordered = sorted(
+            batch.events,
+            key=lambda item: (item[0].finishes_at < current, item[0].starts_at, item[0].key),
+        )
+        candidates: list[RecheckCandidate] = []
+        for event, seed in ordered:
             try:
-                previous = self.database.get_event(event.key)
+                previous = self.database.find_event_alias(event)
+                if previous is not None:
+                    refs = {
+                        (ref.source, ref.record_id, str(ref.url)): ref
+                        for ref in [*previous.event.source_refs, *event.source_refs]
+                    }
+                    event = event.model_copy(
+                        update={
+                            "source": previous.event.source,
+                            "source_id": previous.event.source_id,
+                            "source_refs": list(refs.values())[-32:],
+                            "registration_url": event.registration_url or (
+                                previous.event.registration_url
+                                if event.official_url == previous.event.official_url
+                                else None
+                            ),
+                        }
+                    )
                 self.database.upsert_event(event)
                 report.imported += 1
+                previous_facts = previous.facts if previous is not None else None
+                if self.adaptive_rechecks_enabled:
+                    priority, interval = self._recheck_priority_and_interval(event, current)
+                    checked_at = (
+                        previous_facts.source_checked_at if previous_facts is not None else None
+                    )
+                    changed = previous is not None and any(
+                        getattr(event, name) != getattr(previous.event, name)
+                        for name in ("starts_at", "finishes_at", "official_url", "title", "status")
+                    )
+                    if (
+                        changed
+                        or (
+                            previous_facts is not None
+                            and previous_facts.assessment is None
+                            and previous_facts.source_scan_status
+                            in {SourceScanStatus.READ, SourceScanStatus.LIMITED}
+                        )
+                        or self._due(checked_at, current, interval)
+                    ):
+                        candidates.append(
+                            RecheckCandidate(event, seed, previous_facts, priority, checked_at)
+                        )
+                    else:
+                        report.skipped += 1
+                        report.deferred += 1
+                else:
+                    candidates.append(RecheckCandidate(event, seed, previous_facts, 0, None))
+            except Exception as error:
+                report.failures.append(f"{event.title}: {type(error).__name__}")
+
+        selected = (
+            self._select_rechecks(candidates) if self.adaptive_rechecks_enabled else candidates
+        )
+        if self.adaptive_rechecks_enabled:
+            report.deferred += len(candidates) - len(selected)
+
+        for candidate in selected:
+            event, seed, previous_facts = candidate.event, candidate.seed, candidate.previous
+            try:
                 scan = self._documents_for(event)
+                if (
+                    scan.registration_url
+                    and str(event.registration_url or "") != scan.registration_url
+                ):
+                    event = Event.model_validate({
+                        **event.model_dump(mode="python"),
+                        "registration_url": scan.registration_url,
+                    })
+                    self.database.upsert_event(event)
                 report.failures.extend(scan.failures)
                 checked_at = self.now()
                 if scan.status is SourceScanStatus.FAILED:
                     facts = (
-                        previous.facts
-                        if previous is not None
+                        previous_facts
+                        if previous_facts is not None
                         else extract_event_facts(scan.documents, seed)
                     )
                     facts = facts.model_copy(
@@ -321,16 +497,13 @@ class SyncService:
                             "source_scan_reason": scan.reason,
                             "source_pages_checked": scan.pages_checked,
                             "source_rule_pages_found": scan.rule_pages_found,
+                            # Attempt timestamps keep failed sources on a bounded retry cadence.
                             "source_checked_at": checked_at,
                         }
                     )
                 else:
                     facts = extract_event_facts(scan.documents, seed)
-                    facts = self._apply_model_analysis(
-                        facts,
-                        scan.documents,
-                        previous.facts if previous is not None else None,
-                    )
+                    facts = self._apply_model_analysis(facts, scan.documents, previous_facts)
                     facts = facts.model_copy(
                         update={
                             "analyzed_at": checked_at,
@@ -347,6 +520,49 @@ class SyncService:
                             "source_checked_at": checked_at,
                         }
                     )
+                    assessment = assess_event(event, facts, scan.documents, checked_at)
+                    policy = assessment.ai_policy
+                    first_proof = policy.evidence[0] if policy.evidence else None
+                    facts = facts.model_copy(
+                        update={
+                            "assessment": assessment,
+                            "ai_policy": policy.policy,
+                            "ai_policy_conflicting": policy.state is AssessmentState.CONFLICTING,
+                            "ai_policy_source": str(first_proof.source_url)
+                            if first_proof
+                            else None,
+                            "ai_policy_evidence": first_proof.quote if first_proof else None,
+                            "ai_policy_reason": "Sources disagree about AI use"
+                            if policy.state is AssessmentState.CONFLICTING
+                            else facts.ai_policy_reason,
+                        }
+                    )
+                if scan.status is SourceScanStatus.FAILED and facts.assessment is not None:
+                    facts = facts.model_copy(
+                        update={
+                            "assessment": facts.assessment.model_copy(
+                                update={"recommendation": RecommendationStatus.NEEDS_RULES}
+                            )
+                        }
+                    )
+                if event.raw.get("cached_schedule"):
+                    facts = facts.model_copy(
+                        update={
+                            "analysis_stale": True,
+                            "source_scan_status": SourceScanStatus.LIMITED,
+                            "source_scan_reason": (
+                                "Saved schedule in use; live feeds are unavailable"
+                            ),
+                        }
+                    )
+                    if facts.assessment is not None:
+                        facts = facts.model_copy(
+                            update={
+                                "assessment": facts.assessment.model_copy(
+                                    update={"recommendation": RecommendationStatus.NEEDS_RULES}
+                                )
+                            }
+                        )
                 self.database.save_facts(event.key, facts)
                 report.analyzed += 1
                 if (
@@ -363,4 +579,10 @@ class SyncService:
                         report.queued += 1
             except Exception as error:
                 report.failures.append(f"{event.title}: {type(error).__name__}")
+        for key in set(batch.cancelled_keys):
+            current_event = self.database.find_event_alias(key)
+            if current_event is not None:
+                self.database.upsert_event(
+                    current_event.event.model_copy(update={"status": EventStatus.CANCELLED})
+                )
         return report

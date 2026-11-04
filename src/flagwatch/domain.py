@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
@@ -27,6 +28,94 @@ class SourceScanStatus(StrEnum):
     LIMITED = "limited"
     FAILED = "failed"
     NOT_CHECKED = "not_checked"
+
+
+class AssessmentState(StrEnum):
+    SINGLE_SOURCE = "single_source"
+    CORROBORATED = "corroborated"
+    CONFLICTING = "conflicting"
+    UNKNOWN = "unknown"
+
+
+class RecommendationStatus(StrEnum):
+    RECOMMENDED = "recommended"
+    EXCLUDED_AI_BANNED = "excluded_ai_banned"
+    NEEDS_RULES = "needs_rules"
+
+
+class RewardState(StrEnum):
+    AVAILABLE = "available"
+    NONE = "none"
+    UNKNOWN = "unknown"
+
+
+class ParticipationKind(StrEnum):
+    INTERESTED = "interested"
+    REGISTERED = "registered"
+    MEMBERS = "members"
+    TEAMS = "teams"
+    UNKNOWN = "unknown"
+
+
+class GeographyScope(StrEnum):
+    ST_LOUIS = "st_louis"
+    MISSOURI = "missouri"
+    USA = "usa"
+    OTHER = "other"
+    UNKNOWN = "unknown"
+
+
+class AssessmentEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["quote", "record"] = "quote"
+    source_url: HttpUrl
+    quote: str = Field(min_length=1, max_length=500)
+    checked_at: datetime
+
+
+class AssessmentField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: AssessmentState = AssessmentState.UNKNOWN
+    source_count: int = Field(default=0, ge=0)
+    distinct_source_count: int = Field(default=0, ge=0)
+    evidence: list[AssessmentEvidence] = Field(default_factory=list, max_length=24)
+
+
+class AiPolicyAssessment(AssessmentField):
+    policy: AiPolicy = AiPolicy.UNKNOWN
+
+
+class PrizeAssessment(AssessmentField):
+    reward_state: RewardState = RewardState.UNKNOWN
+    amount: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    summary: str | None = Field(default=None, max_length=320)
+
+
+class ParticipationAssessment(AssessmentField):
+    kind: ParticipationKind = ParticipationKind.UNKNOWN
+    count: int | None = Field(default=None, ge=0)
+
+
+class LocationAssessment(AssessmentField):
+    place: str | None = Field(default=None, max_length=160)
+    geography: GeographyScope = GeographyScope.UNKNOWN
+
+
+class DateAssessment(AssessmentField):
+    starts_at: datetime | None = None
+    finishes_at: datetime | None = None
+
+
+class EventAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recommendation: RecommendationStatus = RecommendationStatus.NEEDS_RULES
+    assessed_at: datetime
+    ai_policy: AiPolicyAssessment = Field(default_factory=AiPolicyAssessment)
+    prizes: PrizeAssessment = Field(default_factory=PrizeAssessment)
+    participation: ParticipationAssessment = Field(default_factory=ParticipationAssessment)
+    location: LocationAssessment = Field(default_factory=LocationAssessment)
+    dates: DateAssessment = Field(default_factory=DateAssessment)
 
 
 class IntelTopic(StrEnum):
@@ -127,9 +216,16 @@ class IntelClaim(BaseModel):
     evidence: str = Field(min_length=1, max_length=500)
 
 
+class EventStatus(StrEnum):
+    SCHEDULED = "scheduled"
+    CANCELLED = "cancelled"
+    TENTATIVE = "tentative"
+
+
 class Event(BaseModel):
     source: str
     source_id: str
+    status: EventStatus = EventStatus.SCHEDULED
     title: str
     official_url: HttpUrl
     ctftime_url: HttpUrl | None = None
@@ -151,6 +247,13 @@ class Event(BaseModel):
     analytics: EventAnalytics = Field(default_factory=EventAnalytics)
     raw: dict[str, object] = Field(default_factory=dict)
 
+    @field_validator("starts_at", "finishes_at")
+    @classmethod
+    def event_time_must_be_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Event time must include a timezone")
+        return value
+
     @model_validator(mode="after")
     def finish_must_follow_start(self) -> Event:
         if self.finishes_at <= self.starts_at:
@@ -165,6 +268,7 @@ class Event(BaseModel):
 
 
 class EventFacts(BaseModel):
+    assessment: EventAssessment | None = None
     ai_policy: AiPolicy = AiPolicy.UNKNOWN
     ai_policy_reason: str = "No clear AI policy found"
     ai_policy_source: str | None = None

@@ -9,7 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_core import ValidationError
 
 from flagwatch.analysis.evidence import EvidenceDocument
-from flagwatch.analysis.providers import ModelConnector, OpenAICompatibleConnector
+from flagwatch.analysis.providers import (
+    ModelConnector,
+    OpenAICompatibleConnector,
+    complete_validated,
+)
 from flagwatch.domain import AiPolicy, IntelClaim
 
 
@@ -84,19 +88,21 @@ class LlmPolicyExtractor:
             "missing or conflict. For non-unknown AI classifications, evidence must be one exact "
             "source quote. Return useful claims about overview, eligibility, registration, "
             "format, schedule, prizes, conduct, flag_sharing, platform, ai_policy, or other "
-            "published restrictions. Every claim needs the exact SOURCE URL and one exact "
+            "published restrictions. Return at most six concise claims. Every claim needs "
+            "the exact SOURCE URL and one exact "
             "supporting quote. Omit anything inferred or unsupported. Use concise natural "
             "language. Do not use em dashes, en dashes, smart quotes, corporate filler, chatbot "
             "scaffolding, or hype. Return only schema-valid JSON using ASCII quotes and hyphens."
         )
         try:
-            content = self.connector.complete(
+            result = complete_validated(
+                self.connector,
                 system_prompt,
                 source_text,
                 LlmPolicyResponse.model_json_schema(),
+                parse_policy_response,
             )
-            if not isinstance(content, str):
-                return None
-            return parse_policy_response(content)
+            self.model = self.connector.model
+            return result
         except (TypeError, ValueError, ValidationError):
             return None

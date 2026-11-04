@@ -4,6 +4,7 @@ import hashlib
 import json
 import smtplib
 import ssl
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from typing import Protocol
 
@@ -23,7 +24,16 @@ class AlertMessage(BaseModel):
 
 
 class NotificationSender(Protocol):
-    def send(self, message: AlertMessage) -> None: ...
+    def send(self, message: AlertMessage) -> str | None: ...
+
+
+def discord_payload(message: AlertMessage) -> dict[str, object]:
+    title = message.title.replace("\r", " ").replace("\n", " ")[:200]
+    # Keep the source link intact even when a source supplies a long description.
+    suffix = "\n" + message.url[:500]
+    prefix = f"**{title}**\n"
+    body = message.body[: max(0, 2000 - len(prefix) - len(suffix))]
+    return {"content": prefix + body + suffix, "allowed_mentions": {"parse": []}}
 
 
 class DiscordWebhookSender:
@@ -31,14 +41,71 @@ class DiscordWebhookSender:
         self.webhook_url = webhook_url
         self.client = client or httpx.Client(timeout=10.0)
 
-    def send(self, message: AlertMessage) -> None:
-        content = f"**{message.title}**\n{message.body}\n{message.url}"
+    def send(self, message: AlertMessage) -> str:
         response = self.client.post(
             self.webhook_url,
             headers={"User-Agent": "Flagwatch/0.1 personal CTF alerts"},
-            json={"content": content[:2000]},
+            params={"wait": "true"},
+            json=discord_payload(message),
         )
         response.raise_for_status()
+        receipt = response.json()
+        if not isinstance(receipt, dict) or not str(receipt.get("id", "")).isdigit():
+            raise ValueError("Discord did not return a message receipt")
+        return str(receipt["id"])
+
+
+class NtfySender:
+    """Push alerts to an ntfy topic. Receipt is the ntfy message id."""
+
+    def __init__(
+        self,
+        server: str,
+        topic: str,
+        priority: int = 4,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self.url = server.rstrip("/") + "/" + topic
+        self.priority = str(max(1, min(5, int(priority))))
+        self.client = client or httpx.Client(timeout=10.0)
+
+    def send(self, message: AlertMessage) -> str:
+        title = message.title.replace("\r", " ").replace("\n", " ")[:200]
+        body = (message.body[:3500] + "\n" + message.url[:500]).encode("utf-8")
+        response = self.client.post(
+            self.url,
+            headers={
+                "User-Agent": "Flagwatch/0.1 personal CTF alerts",
+                "Title": "Flagwatch: " + title,
+                "Priority": self.priority,
+                "Tags": "triangular_flag_on_post",
+                "Click": message.url[:500],
+            },
+            content=body,
+        )
+        response.raise_for_status()
+        receipt = response.json()
+        if not isinstance(receipt, dict) or not receipt.get("id"):
+            raise ValueError("ntfy did not return a message receipt")
+        return str(receipt["id"])
+
+
+def build_sender(settings) -> "NotificationSender | None":
+    """Pick the first configured destination: ntfy, then Discord, then SMTP."""
+    if getattr(settings, "ntfy_topic", None):
+        return NtfySender(str(settings.ntfy_server), settings.ntfy_topic, settings.ntfy_priority)
+    if settings.discord_webhook_url is not None:
+        return DiscordWebhookSender(settings.discord_webhook_url.get_secret_value())
+    if settings.smtp_host and settings.smtp_username and settings.smtp_password and settings.smtp_from and settings.smtp_to:
+        return SmtpSender(
+            host=settings.smtp_host,
+            port=settings.smtp_port,
+            username=settings.smtp_username,
+            password=settings.smtp_password.get_secret_value(),
+            sender=settings.smtp_from,
+            recipient=settings.smtp_to,
+        )
+    return None
 
 
 class SmtpSender:
@@ -139,15 +206,34 @@ def deliver_pending(
     database: Database,
     sender: NotificationSender,
     sending_enabled: bool,
+    *,
+    now: datetime | None = None,
 ) -> int:
     if not sending_enabled:
         return 0
+    current_time = now or datetime.now(UTC)
     delivered = 0
     criteria = database.get_criteria()
     for record in database.list_pending_outbox():
+        if not database.claim_outbox(record.record_id):
+            continue
         current = database.get_event(record.event_key)
         if current is None:
             database.mark_outbox_suppressed(record.record_id, "Event is no longer available")
+            continue
+        checked = current.facts.source_checked_at
+        if current.event.finishes_at <= current_time:
+            database.mark_outbox_suppressed(record.record_id, "Event has finished")
+            continue
+        if (
+            checked is None
+            or checked.tzinfo is None
+            or current_time - checked > timedelta(hours=48)
+            or checked > current_time + timedelta(minutes=5)
+        ):
+            database.mark_outbox_suppressed(
+                record.record_id, "Source evidence is stale or unchecked"
+            )
             continue
         current_match = match_event(current.event, current.facts, criteria)
         if not current_match.alert_eligible:
@@ -155,10 +241,24 @@ def deliver_pending(
             database.mark_outbox_suppressed(record.record_id, reason)
             continue
         try:
-            sender.send(render_alert(current.event, current.facts, current_match))
-        except Exception as error:
-            database.mark_outbox_failed(record.record_id, str(error))
+            receipt = sender.send(render_alert(current.event, current.facts, current_match))
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 429:
+                database.mark_outbox_failed(record.record_id, "Discord rate limited the request")
+                break
+            if 400 <= error.response.status_code < 500:
+                database.mark_outbox_suppressed(
+                    record.record_id, f"Destination rejected HTTP {error.response.status_code}"
+                )
+            else:
+                database.mark_outbox_uncertain(record.record_id)
             continue
-        database.mark_outbox_sent(record.record_id)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            database.mark_outbox_failed(record.record_id, "Destination connection unavailable")
+            continue
+        except Exception:
+            database.mark_outbox_uncertain(record.record_id)
+            continue
+        database.mark_outbox_sent(record.record_id, receipt_id=receipt)
         delivered += 1
     return delivered

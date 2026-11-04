@@ -51,7 +51,9 @@ def _json_objects(value: object) -> Iterable[dict[str, Any]]:
 
 def _parse_datetime(value: object) -> datetime:
     if isinstance(value, datetime):
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("event time must include a timezone")
+        return value
     if isinstance(value, date):
         return datetime.combine(value, time.min, tzinfo=UTC)
     if not isinstance(value, str) or not value.strip():
@@ -60,7 +62,9 @@ def _parse_datetime(value: object) -> datetime:
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
         return datetime.combine(date.fromisoformat(raw), time.min, tzinfo=UTC)
     parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("event time must include a timezone")
+    return parsed
 
 
 def _names(value: object) -> list[str]:

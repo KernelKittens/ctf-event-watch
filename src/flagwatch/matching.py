@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flagwatch.domain import AiPolicy, Criteria, Event, EventFacts, MatchResult
+from flagwatch.domain import AiPolicy, Criteria, Event, EventFacts, EventStatus, MatchResult
 
 ALERT_ELIGIBLE_POLICIES = {AiPolicy.AI_NATIVE, AiPolicy.AI_ASSISTED}
 
@@ -8,6 +8,9 @@ ALERT_ELIGIBLE_POLICIES = {AiPolicy.AI_NATIVE, AiPolicy.AI_ASSISTED}
 def match_event(event: Event, facts: EventFacts, criteria: Criteria) -> MatchResult:
     rejected: list[str] = []
     matched: list[str] = []
+
+    if event.status is EventStatus.CANCELLED:
+        rejected.append("Event is cancelled")
 
     if any(conflict.suppresses_alert for conflict in event.conflicts):
         rejected.append("Authoritative source facts conflict")

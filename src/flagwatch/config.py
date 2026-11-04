@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     sources_json: str | None = None
     send_enabled: bool = False
     discord_webhook_url: SecretStr | None = None
+    ntfy_server: HttpUrl = HttpUrl("https://ntfy.sh")
+    ntfy_topic: str | None = None
+    ntfy_priority: int = Field(default=4, ge=1, le=5)
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_username: str | None = None
@@ -35,4 +38,13 @@ class Settings(BaseSettings):
     ai_endpoint: HttpUrl = HttpUrl("https://api.openai.com/v1")
     ai_model: str = "gpt-5-mini"
     ai_api_key: SecretStr | None = None
+    ai_fallback_provider: str = "anthropic"
+    ai_fallback_endpoint: HttpUrl = HttpUrl("https://api.anthropic.com")
+    ai_fallback_model: str = ""
+    ai_fallback_api_key: SecretStr | None = None
+    resilience_enabled: bool = False
     ai_timeout_seconds: float = Field(default=60.0, ge=5.0, le=300.0)
+    ai_max_calls_per_run: int = Field(default=12, ge=0, le=100)
+    model_telemetry_path: Path | None = None
+    adaptive_rechecks_enabled: bool = False
+    max_event_scans_per_run: int = Field(default=24, ge=1, le=100)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import UTC, datetime
@@ -13,14 +14,22 @@ import uvicorn
 
 from flagwatch.analysis.discovery import WatchPageDiscoveryExtractor
 from flagwatch.analysis.llm import LlmPolicyExtractor
-from flagwatch.analysis.providers import build_model_connector
+from flagwatch.analysis.providers import (
+    CallBudget,
+    FallbackConnector,
+    TrackedConnector,
+    build_model_connector,
+)
 from flagwatch.config import Settings
 from flagwatch.fetching import GuardedFetcher
+from flagwatch.matching import match_event
 from flagwatch.notifications import (
     DiscordWebhookSender,
     NotificationSender,
     SmtpSender,
     deliver_pending,
+    discord_payload,
+    render_alert,
 )
 from flagwatch.public_snapshot import build_public_snapshot
 from flagwatch.sources.factory import build_event_source
@@ -70,6 +79,34 @@ def build_sync_service(settings: Settings, *, queue_notifications: bool = True) 
             ),
             model=settings.ai_model,
         )
+        budget = CallBudget(settings.ai_max_calls_per_run)
+        connector = TrackedConnector(
+            connector,
+            provider=settings.ai_provider,
+            max_calls=settings.ai_max_calls_per_run,
+            telemetry_path=settings.model_telemetry_path,
+            budget=budget,
+        )
+        if settings.ai_fallback_model and settings.ai_fallback_api_key is not None:
+            backup = build_model_connector(
+                provider=settings.ai_fallback_provider,
+                client=model_client,
+                endpoint=str(settings.ai_fallback_endpoint),
+                api_key=settings.ai_fallback_api_key.get_secret_value(),
+                model=settings.ai_fallback_model,
+            )
+            connector = FallbackConnector(
+                [
+                    connector,
+                    TrackedConnector(
+                        backup,
+                        provider=settings.ai_fallback_provider,
+                        max_calls=settings.ai_max_calls_per_run,
+                        budget=budget,
+                        telemetry_path=settings.model_telemetry_path,
+                    ),
+                ]
+            )
         policy_extractor = LlmPolicyExtractor(connector=connector)
         discovery_extractor = WatchPageDiscoveryExtractor(connector)
     fetcher = GuardedFetcher(page_client, max_bytes=settings.max_response_bytes)
@@ -86,6 +123,8 @@ def build_sync_service(settings: Settings, *, queue_notifications: bool = True) 
         lookback_days=settings.ctftime_lookback_days,
         policy_extractor=policy_extractor,
         queue_notifications=queue_notifications,
+        adaptive_rechecks_enabled=settings.adaptive_rechecks_enabled,
+        max_event_scans_per_run=settings.max_event_scans_per_run,
     )
 
 
@@ -121,7 +160,9 @@ def sync_command(
     typer.echo(
         f"Imported {report.imported} events. "
         f"Analyzed {report.analyzed} rule sets. "
-        f"Queued {report.queued} alert preview{'s' if report.queued != 1 else ''}."
+        f"Queued {report.queued} alert preview{'s' if report.queued != 1 else ''}. "
+        f"Deferred {report.deferred} scans "
+        f"({report.skipped} not due)."
     )
     if report.failures:
         typer.echo(f"Kept going after {len(report.failures)} source fetch failures.")
@@ -165,6 +206,38 @@ def refresh(
     finally:
         candidate.unlink(missing_ok=True)
     typer.echo(f"Published {len(snapshot.events)} events to {output}.")
+
+
+@app.command("discord-preview")
+def discord_preview(
+    database: Annotated[
+        Path | None, typer.Option("--database", help="SQLite database path.")
+    ] = None,
+) -> None:
+    """Print current Discord payloads without contacting Discord."""
+    store = _database(_settings(database))
+    criteria = store.get_criteria()
+    current = datetime.now(UTC)
+    messages: list[dict[str, object]] = []
+    for view in store.list_events():
+        match = match_event(view.event, view.facts, criteria)
+        checked = view.facts.source_checked_at
+        if (
+            not match.alert_eligible
+            or view.event.finishes_at <= current
+            or checked is None
+            or checked.tzinfo is None
+            or not 0 <= (current - checked).total_seconds() <= 172800
+        ):
+            continue
+        messages.append(
+            {
+                "event_key": view.event.key,
+                "source_checked_at": checked.isoformat(),
+                "payload": discord_payload(render_alert(view.event, view.facts, match)),
+            }
+        )
+    typer.echo(json.dumps({"sending_enabled": False, "messages": messages}, indent=2))
 
 
 @app.command()
