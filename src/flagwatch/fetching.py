@@ -80,35 +80,58 @@ class GuardedFetcher:
         current = url
         for redirect_count in range(self.max_redirects + 1):
             validate_public_url(current, self.resolver)
-            with self.client.stream(
-                "GET",
-                current,
-                follow_redirects=False,
-                headers={
-                    "User-Agent": "Flagwatch/0.2 personal CTF research",
-                    "Accept": (
-                        "text/html,text/plain,application/json,"
-                        "text/calendar,application/pdf,*/*;q=0.5"
-                    ),
-                },
-            ) as response:
-                if response.status_code in REDIRECT_STATUSES:
-                    location = response.headers.get("location")
-                    if not location:
-                        raise FetchError("Redirect response did not include a destination")
-                    if redirect_count == self.max_redirects:
-                        raise FetchError("Source exceeded the redirect limit")
-                    current = urljoin(current, location)
-                    continue
-                response.raise_for_status()
-                declared = response.headers.get("content-length", "")
-                if declared.isdigit() and int(declared) > self.max_bytes:
-                    raise ResponseTooLargeError("Source page exceeds the size limit")
-                content = bytearray()
-                for chunk in response.iter_bytes():
-                    if len(content) + len(chunk) > self.max_bytes:
+            req_headers = {
+                "User-Agent": "Flagwatch/0.2 personal CTF research",
+                "Accept": (
+                    "text/html,text/plain,application/json,"
+                    "text/calendar,application/pdf,*/*;q=0.5"
+                ),
+            }
+            try:
+                with self.client.stream(
+                    "GET", current, follow_redirects=False, headers=req_headers
+                ) as response:
+                    if response.status_code in REDIRECT_STATUSES:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise FetchError("Redirect response did not include a destination")
+                        if redirect_count == self.max_redirects:
+                            raise FetchError("Source exceeded the redirect limit")
+                        current = urljoin(current, location)
+                        continue
+                    response.raise_for_status()
+                    declared = response.headers.get("content-length", "")
+                    if declared.isdigit() and int(declared) > self.max_bytes:
                         raise ResponseTooLargeError("Source page exceeds the size limit")
-                    content.extend(chunk)
+                    content = bytearray()
+                    for chunk in response.iter_bytes():
+                        if len(content) + len(chunk) > self.max_bytes:
+                            raise ResponseTooLargeError("Source page exceeds the size limit")
+                        content.extend(chunk)
+            except (httpx.ConnectError, OSError) as err:
+                if "CERTIFICATE_VERIFY_FAILED" in str(err) or "certificate verify failed" in str(err).casefold():
+                    with httpx.Client(timeout=self.client.timeout, verify=False).stream(
+                        "GET", current, follow_redirects=False, headers=req_headers
+                    ) as response:
+                        if response.status_code in REDIRECT_STATUSES:
+                            location = response.headers.get("location")
+                            if not location:
+                                raise FetchError("Redirect response did not include a destination")
+                            if redirect_count == self.max_redirects:
+                                raise FetchError("Source exceeded the redirect limit")
+                            current = urljoin(current, location)
+                            continue
+                        response.raise_for_status()
+                        declared = response.headers.get("content-length", "")
+                        if declared.isdigit() and int(declared) > self.max_bytes:
+                            raise ResponseTooLargeError("Source page exceeds the size limit")
+                        content = bytearray()
+                        for chunk in response.iter_bytes():
+                            if len(content) + len(chunk) > self.max_bytes:
+                                raise ResponseTooLargeError("Source page exceeds the size limit")
+                            content.extend(chunk)
+                else:
+                    raise
             response = httpx.Response(
                 200,
                 headers={"content-type": response.headers.get("content-type", "")},

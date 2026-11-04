@@ -106,7 +106,7 @@ def test_public_snapshot_counts_current_confirmed_policy_and_read_source(tmp_pat
         ),
     )
 
-    snapshot = build_public_snapshot(database, generated_at=starts_at)
+    snapshot = build_public_snapshot(database, generated_at=starts_at, filter_human_only=True)
 
     assert snapshot.scan_summary.sources_read == 1
     assert snapshot.scan_summary.sources_need_recheck == 0
@@ -180,7 +180,7 @@ def test_public_snapshot_omits_confirmed_full_ai_bans(tmp_path):
         database.upsert_event(event)
         database.save_facts(event.key, facts)
 
-    snapshot = build_public_snapshot(database, generated_at=starts_at)
+    snapshot = build_public_snapshot(database, generated_at=starts_at, filter_human_only=True)
 
     assert {event.event_key for event in snapshot.events} == {
         "ctftime:assisted",

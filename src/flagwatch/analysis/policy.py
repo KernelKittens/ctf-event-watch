@@ -15,6 +15,9 @@ AI_TERMS = re.compile(
 NATIVE_ALLOW = re.compile(
     r"(?:\b(all forms of ai usage|all ai tools|unrestricted ai|ai[- ]native)\b.{0,32}"
     r"\b(allowed|permitted|welcome)\b|"
+    r"\bunrestricted\s+(?:use\s+of\s+)?ai\b|"
+    r"\bany\s+and\s+all\s+(?:ai\s+)?tools?\s+(?:are\s+)?allowed\b|"
+    r"\bautonomous\s+(?:ai|agents?)\s+(?:allowed|permitted|welcome)\b|"
     r"\b(?:any|all)\s+tools?\b.{0,24}\b(?:allowed|permitted|fine)\b.{0,40}"
     r"\b(?:including|includes?)\s+(?:ai|llms?|large language models?)\b|"
     r"\btools?\s+of\s+any\s+kind\b.{0,24}\b(?:allowed|permitted)\b.{0,64}"
@@ -27,6 +30,9 @@ NATIVE_ALLOW = re.compile(
 ASSISTED_ALLOW = re.compile(
     r"(?:\b(interactive ai assistance|ai assistance|ai-assisted code generation|use of ai)\b"
     r".{0,48}\b(allowed|permitted|encouraged|fine)\b|"
+    r"\b(?:chatgpt|copilot|claude|gemini|llms?)\b.{0,32}\b(?:allowed|permitted|welcome|fine)\b|"
+    r"\b(?:you\s+may|can|feel\s+free\s+to)\s+use\s+(?:ai|chatgpt|copilot|claude|llms?)\b|"
+    r"\bai\s+(?:tools?\s+)?(?:is|are)\s+(?:allowed|permitted|welcome|fine)\b|"
     r"\busing\s+ai\s+to\b.{0,72}\b(?:explain|research|learn)\b.{0,72}"
     r"\b(?:allowed|permitted|fine)\b)",
     re.IGNORECASE,
@@ -39,6 +45,10 @@ DOCUMENTED_AI_SOLVING = re.compile(
 SOLVING_PROHIBITION = re.compile(
     r"(?:\bif\s+ai\s+is\s+used\s+to\s+solve\b.{0,120}\bdisqualif|"
     r"\bno\s+(?:llms?|ai assistants?)\b.{0,72}\bsolv|"
+    r"\b(?:strictly\s+)?no\s+ai\b(?!\s+(?:hacking|category|challenges?))|"
+    r"\bai\s+(?:is\s+)?(?:strictly\s+)?(?:prohibited|forbidden|banned|disallowed|not\s+allowed)\b|"
+    r"\b(?:using|use\s+of)\s+ai\s+(?:is\s+)?(?:strictly\s+)?(?:prohibited|forbidden|banned|disallowed|not\s+allowed)\b|"
+    r"\b(?:chatgpt|copilot|claude|gemini)\b.{0,32}\b(?:prohibited|forbidden|banned|disallowed|not\s+allowed)\b|"
     r"\b(?:all\s+)?(?:ai usage|ai use|use of ai|artificial intelligence)\b"
     r".{0,40}\b(?:prohibited|forbidden|not allowed)\b|"
     r"\b(?:llms?|ai assistants?|ai tools?)\b.{0,72}\b(?:prohibited|forbidden|not allowed)\b|"

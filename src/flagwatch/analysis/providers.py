@@ -210,7 +210,7 @@ def build_model_connector(
     normalized = provider.strip().casefold().replace("-", "_")
     if normalized == "anthropic":
         return AnthropicMessagesConnector(client, endpoint, api_key, model)
-    if normalized in {"openai", "litellm"}:
+    if normalized in {"openai", "litellm", "azure_openai"}:
         return OpenAICompatibleConnector(client, endpoint, api_key, model)
     if normalized in {"deepseek", "local"}:
         return OpenAICompatibleConnector(

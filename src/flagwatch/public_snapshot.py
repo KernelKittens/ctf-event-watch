@@ -149,6 +149,7 @@ def build_public_snapshot(
     database: Database,
     generated_at: datetime,
     history_days: int = 31,
+    filter_human_only: bool = False,
 ) -> PublicSnapshot:
     history_cutoff = generated_at - timedelta(days=history_days)
     events = [
@@ -189,7 +190,7 @@ def build_public_snapshot(
             registration_status=view.facts.registration_status,
             categories=view.facts.categories,
             intel_claims=view.facts.intel_claims,
-            intel_model=None,
+            intel_model=view.facts.intel_model,
             intel_analyzed_at=view.facts.intel_analyzed_at,
             intel_stale=view.facts.intel_stale,
             source_scan_status=view.facts.source_scan_status,
@@ -201,6 +202,12 @@ def build_public_snapshot(
         )
         for view in database.list_events()
         if view.event.finishes_at >= history_cutoff
+        and (
+            not filter_human_only
+            or view.facts.ai_policy is not AiPolicy.HUMAN_ONLY
+            or view.facts.analysis_stale
+            or view.facts.ai_policy_conflicting
+        )
     ]
     summary = PublicScanSummary(
         sources_read=sum(

@@ -147,7 +147,10 @@ class CtfHubSource:
         official_url = _text(details.get("official_url"), required=True)
         if not event_id:
             raise ValueError("CTFHub event id is required")
-        validate_public_url(official_url, self.resolver)
+        try:
+            validate_public_url(official_url, self.resolver)
+        except (FetchError, ValueError):
+            official_url = f"https://www.ctfhub.com/#/event/{event_id}"
         form = _text(details.get("form") or summary.get("form"))
         event_class = _text(details.get("class") or summary.get("class"))
         description = extract_readable_text(_text(details.get("details")))

@@ -88,7 +88,7 @@ def test_failed_delivery_is_recorded_for_review(tmp_path):
         def send(self, _message: AlertMessage) -> None:
             raise RuntimeError("webhook rejected the request")
 
-    delivered = deliver_pending(database, BrokenSender(), sending_enabled=True)
+    delivered = deliver_pending(database, BrokenSender(), sending_enabled=True, now=start)
     record = database.list_outbox()[0]
 
     assert delivered == 0

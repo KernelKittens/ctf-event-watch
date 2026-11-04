@@ -10,6 +10,12 @@ from typing import Any
 import httpx
 from pydantic import HttpUrl
 
+from flagwatch.analysis.facts import (
+    _categories,
+    _prize_summary,
+    _registration_url,
+    _team_max,
+)
 from flagwatch.domain import Event, EventFacts, EventStatus, ScheduleMode, SourceKind, SourceRef
 from flagwatch.rule_pages import extract_readable_text
 from flagwatch.sources import EventBatch
@@ -78,6 +84,23 @@ def normalize_ctftime_event(
         for organizer in payload.get("organizers", [])
         if isinstance(organizer, dict) and organizer.get("name")
     ]
+    reg_url_str = _registration_url(description)
+    reg_url = None
+    if reg_url_str:
+        try:
+            reg_url = HttpUrl(reg_url_str)
+        except Exception:
+            pass
+
+    extracted_format = str(payload.get("format")) if payload.get("format") else None
+    if not extracted_format:
+        if re.search(r"\battack[- ]defense\b|\ba/d\b", description, re.I):
+            extracted_format = "Attack-Defense"
+        elif re.search(r"\bking of the hill\b|\bkoth\b", description, re.I):
+            extracted_format = "King of the Hill"
+        elif re.search(r"\bjeopardy\b", description, re.I):
+            extracted_format = "Jeopardy"
+
     event = Event(
         source="ctftime",
         source_id=str(payload["id"]),
@@ -85,11 +108,12 @@ def normalize_ctftime_event(
         title=str(payload["title"]).strip(),
         official_url=HttpUrl(str(payload["url"])),
         ctftime_url=HttpUrl(str(payload["ctftime_url"])),
+        registration_url=reg_url,
         starts_at=datetime.fromisoformat(str(payload["start"])),
         finishes_at=datetime.fromisoformat(str(payload["finish"])),
         online=not onsite,
         onsite=onsite,
-        format=str(payload.get("format")) if payload.get("format") else None,
+        format=extracted_format,
         description=description,
         prizes=prizes,
         weight=_decimal_or_none(payload.get("weight")),
@@ -110,10 +134,11 @@ def normalize_ctftime_event(
         raw=dict(payload),
     )
     facts = EventFacts(
-        team_max=_parse_team_max(description),
+        team_max=_team_max(description),
         divisions=_parse_divisions(description),
+        categories=_categories(description),
         schedule_mode=ScheduleMode.FIXED,
-        prize_summary=prizes.strip() or None,
+        prize_summary=_prize_summary(description, prizes.strip() or None),
     )
     return event, facts
 

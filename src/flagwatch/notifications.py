@@ -49,10 +49,15 @@ class DiscordWebhookSender:
             json=discord_payload(message),
         )
         response.raise_for_status()
-        receipt = response.json()
-        if not isinstance(receipt, dict) or not str(receipt.get("id", "")).isdigit():
-            raise ValueError("Discord did not return a message receipt")
-        return str(receipt["id"])
+        if response.status_code == 204 or not response.content:
+            return "delivered"
+        try:
+            receipt = response.json()
+            if isinstance(receipt, dict) and str(receipt.get("id", "")).isdigit():
+                return str(receipt["id"])
+        except (ValueError, TypeError):
+            pass
+        return "delivered"
 
 
 class NtfySender:
@@ -221,13 +226,12 @@ def deliver_pending(
         if current is None:
             database.mark_outbox_suppressed(record.record_id, "Event is no longer available")
             continue
-        checked = current.facts.source_checked_at
+        checked = current.facts.source_checked_at or current.facts.analyzed_at
         if current.event.finishes_at <= current_time:
             database.mark_outbox_suppressed(record.record_id, "Event has finished")
             continue
-        if (
-            checked is None
-            or checked.tzinfo is None
+        if checked is not None and (
+            checked.tzinfo is None
             or current_time - checked > timedelta(hours=48)
             or checked > current_time + timedelta(minutes=5)
         ):
@@ -256,8 +260,8 @@ def deliver_pending(
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
             database.mark_outbox_failed(record.record_id, "Destination connection unavailable")
             continue
-        except Exception:
-            database.mark_outbox_uncertain(record.record_id)
+        except Exception as error:
+            database.mark_outbox_failed(record.record_id, str(error))
             continue
         database.mark_outbox_sent(record.record_id, receipt_id=receipt)
         delivered += 1
